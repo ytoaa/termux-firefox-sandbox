@@ -12,15 +12,14 @@ concurrency:
 
 jobs:
   build:
-    name: Firefox sandbox aarch64
+    name: Firefox Sandbox aarch64
     runs-on: ubuntu-26.04
     timeout-minutes: 355
 
     steps:
-      # ------------------------------------------------------------
-      # 1. Always use the current upstream Termux package recipes.
-      #    The workflow itself may live in any repository/fork.
-      # ------------------------------------------------------------
+      # ============================================================
+      # 1. Always build from current upstream Termux packages
+      # ============================================================
       - name: Checkout termux-packages
         uses: actions/checkout@v7
         with:
@@ -28,35 +27,43 @@ jobs:
           ref: master
           fetch-depth: 1
 
-      # ------------------------------------------------------------
-      # 2. Basic sanity check.
-      # ------------------------------------------------------------
+      # ============================================================
+      # 2. Verify current Firefox package
+      # ============================================================
       - name: Verify Firefox recipe
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "Repository:"
-          git remote -v
+          FIREFOX_DIR="x11-packages/firefox"
+          MOZCONFIG="$FIREFOX_DIR/mozconfig.cfg"
+          BUILD_SH="$FIREFOX_DIR/build.sh"
+
+          test -d "$FIREFOX_DIR"
+          test -f "$MOZCONFIG"
+          test -f "$BUILD_SH"
+
+          echo "=== Upstream commit ==="
           git rev-parse HEAD
 
           echo
-          echo "Firefox files:"
-          ls -la x11-packages/firefox/
-
-          MOZCONFIG="x11-packages/firefox/mozconfig.cfg"
-
-          test -f "$MOZCONFIG"
+          echo "=== Firefox version ==="
+          grep '^TERMUX_PKG_VERSION=' "$BUILD_SH"
+          grep '^TERMUX_PKG_REVISION=' "$BUILD_SH" || true
 
           echo
-          echo "Current sandbox setting:"
+          echo "=== Current sandbox config ==="
           grep -n 'sandbox' "$MOZCONFIG"
 
+          # Fail safely if upstream changes the setting unexpectedly.
           grep -q '^ac_add_options --disable-sandbox$' "$MOZCONFIG"
 
-      # ------------------------------------------------------------
-      # 3. Enable Mozilla sandbox.
-      # ------------------------------------------------------------
+      # ============================================================
+      # 3. Enable Firefox sandbox
+      #
+      # Also configure sccache. sccache itself is installed later
+      # inside the Termux builder container.
+      # ============================================================
       - name: Enable Firefox sandbox
         shell: bash
         run: |
@@ -68,23 +75,205 @@ jobs:
             's/^ac_add_options --disable-sandbox$/ac_add_options --enable-sandbox/' \
             "$MOZCONFIG"
 
-          echo "Sandbox setting after patch:"
-          grep -n 'sandbox' "$MOZCONFIG"
+          # Avoid duplicate entry if workflow is changed/reused.
+          if ! grep -q '^ac_add_options --with-ccache=sccache$' "$MOZCONFIG"; then
+            echo 'ac_add_options --with-ccache=sccache' >> "$MOZCONFIG"
+          fi
+
+          echo "=== Modified mozconfig ==="
+          grep -nE 'sandbox|ccache' "$MOZCONFIG"
 
           grep -q '^ac_add_options --enable-sandbox$' "$MOZCONFIG"
 
+      # ============================================================
+      # 4. Add Termux/Bionic compatibility fixes for Linux sandbox
+      #
+      # Fix 1:
+      #   SandboxReporterCommon.h
+      #   struct timespec incomplete on Bionic.
+      #
+      # Fix 2:
+      #   Chromium sandbox lock implementation expects
+      #   pthread_mutexattr_setprotocol().
+      #   Disable PI mutexes on Termux, matching existing Termux logic.
+      #
+      # Fix 3:
+      #   RunGlibcLazyInitializers() calls shm_open().
+      #   It explicitly exists for glibc lazy initialization,
+      #   which is irrelevant on Termux/Bionic.
+      # ============================================================
+      - name: Add Termux sandbox compatibility patch
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          PATCH="x11-packages/firefox/9999-termux-sandbox-compat.patch"
+
+          cat > "$PATCH" <<'PATCH'
+          --- a/security/sandbox/linux/reporter/SandboxReporterCommon.h
+          +++ b/security/sandbox/linux/reporter/SandboxReporterCommon.h
+          @@ -6,6 +6,7 @@
+           #ifndef mozilla_SandboxReporterCommon_h
+           #define mozilla_SandboxReporterCommon_h
+
+          +#include <time.h>
+           #include <sys/types.h>
+
+           #include "mozilla/IntegerTypeTraits.h"
+
+          --- a/security/sandbox/chromium/base/synchronization/lock_impl_posix.cc
+          +++ b/security/sandbox/chromium/base/synchronization/lock_impl_posix.cc
+          @@ -99,7 +99,7 @@
+           // Lock::PriorityInheritanceAvailable still must be checked as the code may
+           // compile but the underlying platform still may not correctly support priority
+           // inheritance locks.
+          -#if BUILDFLAG(IS_FUCHSIA)
+          +#if BUILDFLAG(IS_FUCHSIA) || defined(__TERMUX__)
+           #define PRIORITY_INHERITANCE_LOCKS_POSSIBLE() 0
+           #else
+           #define PRIORITY_INHERITANCE_LOCKS_POSSIBLE() 1
+
+          --- a/security/sandbox/linux/Sandbox.cpp
+          +++ b/security/sandbox/linux/Sandbox.cpp
+          @@ -561,7 +561,9 @@
+          +#if !defined(__TERMUX__)
+           static void RunGlibcLazyInitializers() {
+             // Make glibc's lazy initialization of shm_open() run before sandboxing
+             int fd = shm_open("/dummy", O_RDONLY, 0);
+             if (fd > 0) {
+               close(fd);  // In the unlikely case we actually opened something
+             }
+           }
+          +#endif
+
+          @@ -585,5 +587,7 @@
+           #endif
+
+          +#if !defined(__TERMUX__)
+             RunGlibcLazyInitializers();
+          +#endif
+
+             // This will run on main thread before  it is in a signal-handler context, to
+          PATCH
+
+          echo "=== Sandbox compatibility patch ==="
+          cat "$PATCH"
+
+      # ============================================================
+      # 5. Give our package a revision above official Termux package
+      #
+      # Example:
+      #   official: 155.0.1
+      #   ours:     155.0.1-1
+      #
+      # Or:
+      #   official: 155.0.1-2
+      #   ours:     155.0.1-3
+      #
+      # This will later let our APT repository override official
+      # Firefox while keeping the package name "firefox".
+      # ============================================================
+      - name: Increase custom package revision
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          BUILD_SH="x11-packages/firefox/build.sh"
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("x11-packages/firefox/build.sh")
+          text = path.read_text()
+
+          revision = re.search(
+              r"^TERMUX_PKG_REVISION=(\d+)\s*$",
+              text,
+              flags=re.MULTILINE,
+          )
+
+          if revision:
+              old = int(revision.group(1))
+              new = old + 1
+
+              text = (
+                  text[:revision.start()]
+                  + f"TERMUX_PKG_REVISION={new}"
+                  + text[revision.end():]
+              )
+          else:
+              version = re.search(
+                  r"^TERMUX_PKG_VERSION=.*$",
+                  text,
+                  flags=re.MULTILINE,
+              )
+
+              if not version:
+                  raise SystemExit("TERMUX_PKG_VERSION not found")
+
+              text = (
+                  text[:version.end()]
+                  + "\nTERMUX_PKG_REVISION=1"
+                  + text[version.end():]
+              )
+
+          path.write_text(text)
+          PY
+
+          echo "=== Custom package version ==="
+          grep '^TERMUX_PKG_VERSION=' "$BUILD_SH"
+          grep '^TERMUX_PKG_REVISION=' "$BUILD_SH"
+
+      # ============================================================
+      # 6. Save all modifications for diagnostics
+      # ============================================================
+      - name: Save custom diff
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          git diff -- \
+            x11-packages/firefox/mozconfig.cfg \
+            x11-packages/firefox/build.sh \
+            x11-packages/firefox/9999-termux-sandbox-compat.patch \
+            | tee firefox-sandbox-changes.diff
+
           echo
-          echo "Patch:"
-          git diff -- "$MOZCONFIG"
+          echo "=== Modified package files ==="
+          git status --short x11-packages/firefox/
 
-          git diff -- "$MOZCONFIG" > firefox-sandbox.patch
+      # ============================================================
+      # 7. Restore compiler cache
+      #
+      # Cache is especially useful for our repeated sandbox builds.
+      # ============================================================
+      - name: Restore Firefox sccache
+        uses: actions/cache@v4
+        with:
+          path: .sccache
+          key: >-
+            firefox-sccache-aarch64-v1-${{
+              hashFiles(
+                'x11-packages/firefox/build.sh',
+                'x11-packages/firefox/mozconfig.cfg',
+                'x11-packages/firefox/9999-termux-sandbox-compat.patch'
+              )
+            }}
+          restore-keys: |
+            firefox-sccache-aarch64-v1-
 
-          # Ensure that this experiment changes only what we expect.
-          test "$(git diff --numstat "$MOZCONFIG" | awk '{print $1+$2}')" = "2"
+      - name: Prepare sccache directory
+        shell: bash
+        run: |
+          mkdir -p .sccache
 
-      # ------------------------------------------------------------
-      # 4. Firefox is a large package. Termux's own CI uses 16G zram.
-      # ------------------------------------------------------------
+          # GitHub runner/container UID differences must not prevent access.
+          chmod 0777 .sccache
+
+      # ============================================================
+      # 8. Firefox is a huge build, same 16G zram used by Termux CI
+      # ============================================================
       - name: Enable zram
         uses: ./.github/actions/zram
         with:
@@ -93,13 +282,15 @@ jobs:
           priority: 100
           device_name: /dev/zram0
 
-      # ------------------------------------------------------------
-      # 5. Pull official Termux builder.
+      # ============================================================
+      # 9. Pull Termux official package builder
       #
-      #    GHCR occasionally resets large layer downloads, so retry.
-      #    If GHCR remains unavailable, build the builder image from
-      #    the current upstream scripts/Dockerfile.
-      # ------------------------------------------------------------
+      # GHCR occasionally resets the connection while downloading
+      # large layers, so retry.
+      #
+      # If all retries fail, build the same image locally using
+      # scripts/Dockerfile. This matches Termux's own CI method.
+      # ============================================================
       - name: Prepare Termux Docker builder
         shell: bash
         run: |
@@ -110,144 +301,189 @@ jobs:
 
           for attempt in 1 2 3 4 5; do
             echo
-            echo "========================================"
+            echo "======================================"
             echo "Docker pull attempt ${attempt}/5"
-            echo "========================================"
+            echo "======================================"
 
             if docker pull "$IMAGE"; then
               PULLED=1
               break
             fi
 
-            echo "Docker pull failed."
-
             if [ "$attempt" -lt 5 ]; then
               delay=$((attempt * 15))
-              echo "Retrying after ${delay}s..."
+              echo "Pull failed. Retrying in ${delay}s..."
               sleep "$delay"
             fi
           done
 
           if [ "$PULLED" -ne 1 ]; then
             echo
-            echo "========================================"
-            echo "GHCR pull repeatedly failed."
-            echo "Building Termux builder locally."
-            echo "========================================"
+            echo "======================================"
+            echo "GHCR unavailable - local builder build"
+            echo "======================================"
 
             docker build \
-              --tag "$IMAGE" \
+              -t "$IMAGE" \
               scripts/
+
+            docker buildx prune -af || true
           fi
 
-          echo
-          echo "Builder image:"
           docker image inspect "$IMAGE" \
             --format 'ID={{.Id}} Size={{.Size}} Created={{.Created}}'
 
-      # ------------------------------------------------------------
-      # 6. Create/start the official Termux builder container.
+      # ============================================================
+      # 10. Start the Termux builder before free-space.sh
       #
-      #    Do this BEFORE free-space.sh. The Termux script explicitly
-      #    removes compressed containerd blobs after Docker has inflated
-      #    the image.
-      # ------------------------------------------------------------
+      # This order also follows upstream Termux CI for large packages.
+      # ============================================================
       - name: Start Termux builder
         shell: bash
         run: |
           set -euxo pipefail
 
-          # Defensive cleanup in case this workflow is later used on a
-          # persistent/self-hosted runner.
           docker rm -f termux-package-builder 2>/dev/null || true
 
           ./scripts/run-docker.sh true
 
-          echo
           docker ps -a
-          docker image ls
 
-      # ------------------------------------------------------------
-      # 7. Reclaim GitHub runner disk space.
-      #
-      #    Termux's own CI does this for large packages.
-      # ------------------------------------------------------------
+      # ============================================================
+      # 11. Free GitHub runner disk
+      # ============================================================
       - name: Free runner disk space
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "Before:"
+          echo "=== Before ==="
           df -h
 
           ./scripts/free-space.sh
 
           echo
-          echo "After:"
+          echo "=== After ==="
           df -h
 
-      # ------------------------------------------------------------
-      # 8. Build only Firefox for aarch64.
+      # ============================================================
+      # 12. Install sccache inside Termux build container
+      # ============================================================
+      - name: Install sccache in builder
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          ./scripts/run-docker.sh bash -lc '
+            if ! command -v sccache >/dev/null 2>&1; then
+              sudo apt-get update
+              sudo apt-get install -y sccache
+            fi
+
+            echo "sccache:"
+            command -v sccache
+            sccache --version
+          '
+
+      # ============================================================
+      # 13. Reset compiler cache statistics
+      # ============================================================
+      - name: Reset sccache statistics
+        shell: bash
+        run: |
+          ./scripts/run-docker.sh \
+            env \
+              SCCACHE_DIR=/home/builder/termux-packages/.sccache \
+              SCCACHE_CACHE_SIZE=6G \
+            sccache --zero-stats || true
+
+      # ============================================================
+      # 14. Build Firefox
       #
-      #    -f : force Firefox build
-      #    -I : download dependencies instead of building all of them
-      # ------------------------------------------------------------
+      # -f : force Firefox itself to build
+      # -I : install dependencies from Termux repos rather than
+      #      rebuilding every dependency
+      # ============================================================
       - name: Build Firefox
-        id: build
         shell: bash
         run: |
           set -o pipefail
 
-          echo "Starting Firefox sandbox build..."
-
           ./scripts/run-docker.sh \
+            env \
+              SCCACHE_DIR=/home/builder/termux-packages/.sccache \
+              SCCACHE_CACHE_SIZE=6G \
             ./build-package.sh \
-            -f \
-            -I \
-            -a aarch64 \
-            firefox \
+              -f \
+              -I \
+              -a aarch64 \
+              firefox \
             2>&1 | tee firefox-build.log
 
-      # ------------------------------------------------------------
-      # 9. Print useful diagnostics even when the build failed.
-      # ------------------------------------------------------------
+      # ============================================================
+      # 15. SCCache stats
+      # ============================================================
+      - name: Show sccache statistics
+        if: always()
+        shell: bash
+        run: |
+          ./scripts/run-docker.sh \
+            env \
+              SCCACHE_DIR=/home/builder/termux-packages/.sccache \
+              SCCACHE_CACHE_SIZE=6G \
+            sccache --show-stats || true
+
+      # ============================================================
+      # 16. Diagnostics
+      # ============================================================
       - name: Build diagnostics
         if: always()
         shell: bash
         run: |
-          echo "========================================"
-          echo "Git diff"
-          echo "========================================"
-          git diff -- x11-packages/firefox/mozconfig.cfg || true
+          echo "======================================"
+          echo "Firefox package modifications"
+          echo "======================================"
+          git diff -- x11-packages/firefox/ || true
 
           echo
-          echo "========================================"
-          echo "Disk space"
-          echo "========================================"
+          echo "======================================"
+          echo "Disk"
+          echo "======================================"
           df -h || true
 
           echo
-          echo "========================================"
-          echo "Docker containers"
-          echo "========================================"
+          echo "======================================"
+          echo "Docker"
+          echo "======================================"
           docker ps -a || true
 
           echo
-          echo "========================================"
-          echo "Output directory"
-          echo "========================================"
-          find output -maxdepth 2 -type f -printf '%p %k KB\n' \
-            2>/dev/null | sort || true
+          echo "======================================"
+          echo "Build outputs"
+          echo "======================================"
+
+          find output \
+            -type f \
+            -name '*.deb' \
+            -print \
+            2>/dev/null || true
+
+          find termux-packages/output \
+            -type f \
+            -name '*.deb' \
+            -print \
+            2>/dev/null || true
 
           echo
-          echo "========================================"
-          echo "Last 150 build-log lines"
-          echo "========================================"
-          tail -n 150 firefox-build.log 2>/dev/null || true
+          echo "======================================"
+          echo "Last 250 log lines"
+          echo "======================================"
 
-      # ------------------------------------------------------------
-      # 10. Collect successfully produced .deb files.
-      # ------------------------------------------------------------
+          tail -n 250 firefox-build.log 2>/dev/null || true
+
+      # ============================================================
+      # 17. Collect Firefox .deb
+      # ============================================================
       - name: Collect Firefox package
         if: success()
         shell: bash
@@ -256,20 +492,29 @@ jobs:
 
           mkdir -p artifacts
 
-          find output \
+          find output termux-packages/output \
             -type f \
             -name 'firefox_*.deb' \
             -print \
-            -exec cp -v '{}' artifacts/ ';'
+            -exec cp -v '{}' artifacts/ ';' \
+            2>/dev/null || true
 
-          cp firefox-sandbox.patch artifacts/
+          cp firefox-sandbox-changes.diff artifacts/
 
-          if ! find artifacts \
+          cp \
+            x11-packages/firefox/9999-termux-sandbox-compat.patch \
+            artifacts/
+
+          DEB="$(
+            find artifacts \
               -maxdepth 1 \
               -type f \
               -name 'firefox_*.deb' \
-              -print -quit | grep -q .; then
-            echo "ERROR: Firefox .deb was not found."
+              -print -quit
+          )"
+
+          if [ -z "$DEB" ]; then
+            echo "Firefox .deb not found"
             exit 1
           fi
 
@@ -279,12 +524,12 @@ jobs:
           )
 
           echo
-          echo "Artifacts:"
+          echo "=== Final artifacts ==="
           ls -lh artifacts/
 
-      # ------------------------------------------------------------
-      # 11. Upload the .deb.
-      # ------------------------------------------------------------
+      # ============================================================
+      # 18. Upload successful Firefox package
+      # ============================================================
       - name: Upload Firefox sandbox package
         if: success()
         uses: actions/upload-artifact@v6
@@ -293,12 +538,11 @@ jobs:
           path: artifacts/
           if-no-files-found: error
           compression-level: 0
-          retention-days: 7
+          retention-days: 14
 
-      # ------------------------------------------------------------
-      # 12. Always preserve the build log and patch.
-      #     This is especially useful if --enable-sandbox fails.
-      # ------------------------------------------------------------
+      # ============================================================
+      # 19. Always preserve build failure diagnostics
+      # ============================================================
       - name: Upload build diagnostics
         if: always()
         uses: actions/upload-artifact@v6
@@ -306,6 +550,7 @@ jobs:
           name: firefox-sandbox-build-diagnostics
           path: |
             firefox-build.log
-            firefox-sandbox.patch
+            firefox-sandbox-changes.diff
+            x11-packages/firefox/9999-termux-sandbox-compat.patch
           if-no-files-found: ignore
-          retention-days: 7
+          retention-days: 14
