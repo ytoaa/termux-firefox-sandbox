@@ -12,28 +12,45 @@ jobs:
     timeout-minutes: 350
 
     steps:
-      - name: Checkout
+      - name: Checkout Termux packages
         uses: actions/checkout@v7
+        with:
+          repository: termux/termux-packages
+          ref: master
+          fetch-depth: 1
+
+      - name: Verify repository
+        run: |
+          pwd
+          git remote -v
+          ls -la
+          ls -la x11-packages/firefox
+          grep -n sandbox x11-packages/firefox/mozconfig.cfg
 
       - name: Enable Firefox sandbox
         shell: bash
         run: |
           set -euxo pipefail
 
-          echo "Before:"
-          grep -n sandbox x11-packages/firefox/mozconfig.cfg
+          FILE="x11-packages/firefox/mozconfig.cfg"
 
-          grep -q '^ac_add_options --disable-sandbox$' \
-            x11-packages/firefox/mozconfig.cfg
+          echo "Before:"
+          grep -n sandbox "$FILE"
+
+          grep -q '^ac_add_options --disable-sandbox$' "$FILE"
 
           sed -i \
             's/^ac_add_options --disable-sandbox$/ac_add_options --enable-sandbox/' \
-            x11-packages/firefox/mozconfig.cfg
+            "$FILE"
 
           echo "After:"
-          grep -n sandbox x11-packages/firefox/mozconfig.cfg
+          grep -n sandbox "$FILE"
 
-          git diff -- x11-packages/firefox/mozconfig.cfg
+          echo
+          echo "Diff:"
+          git diff -- "$FILE"
+
+          grep -q '^ac_add_options --enable-sandbox$' "$FILE"
 
       - name: Enable zram
         uses: ./.github/actions/zram
@@ -68,18 +85,18 @@ jobs:
         run: |
           mkdir -p artifacts
 
-          find . -type f \
-            -name 'firefox_*.deb' \
-            -print \
-            -exec cp -v '{}' artifacts/ ';'
+          echo "Build output:"
+          find output -maxdepth 1 -type f -name '*.deb' -ls || true
 
-          echo
-          echo "Artifacts:"
-          ls -lh artifacts/
+          find output -maxdepth 1 \
+            -type f \
+            -name 'firefox_*.deb' \
+            -exec cp -v '{}' artifacts/ ';'
 
           test -n "$(find artifacts -type f -name 'firefox_*.deb' -print -quit)"
 
           sha256sum artifacts/*.deb > artifacts/SHA256SUMS
+          ls -lh artifacts
 
       - name: Upload Firefox package
         if: success()
