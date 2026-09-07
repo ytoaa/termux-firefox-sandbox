@@ -1,4 +1,4 @@
-name: Build Firefox with Sandbox
+name: Build Termux Firefox with Sandbox
 
 on:
   workflow_dispatch:
@@ -6,52 +6,85 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: firefox-sandbox-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
-  build-firefox:
+  build:
+    name: Firefox sandbox aarch64
     runs-on: ubuntu-26.04
-    timeout-minutes: 350
+    timeout-minutes: 355
 
     steps:
-      - name: Checkout Termux packages
+      # ------------------------------------------------------------
+      # 1. Always use the current upstream Termux package recipes.
+      #    The workflow itself may live in any repository/fork.
+      # ------------------------------------------------------------
+      - name: Checkout termux-packages
         uses: actions/checkout@v7
         with:
           repository: termux/termux-packages
           ref: master
           fetch-depth: 1
 
-      - name: Verify repository
+      # ------------------------------------------------------------
+      # 2. Basic sanity check.
+      # ------------------------------------------------------------
+      - name: Verify Firefox recipe
+        shell: bash
         run: |
-          pwd
-          git remote -v
-          ls -la
-          ls -la x11-packages/firefox
-          grep -n sandbox x11-packages/firefox/mozconfig.cfg
+          set -euxo pipefail
 
+          echo "Repository:"
+          git remote -v
+          git rev-parse HEAD
+
+          echo
+          echo "Firefox files:"
+          ls -la x11-packages/firefox/
+
+          MOZCONFIG="x11-packages/firefox/mozconfig.cfg"
+
+          test -f "$MOZCONFIG"
+
+          echo
+          echo "Current sandbox setting:"
+          grep -n 'sandbox' "$MOZCONFIG"
+
+          grep -q '^ac_add_options --disable-sandbox$' "$MOZCONFIG"
+
+      # ------------------------------------------------------------
+      # 3. Enable Mozilla sandbox.
+      # ------------------------------------------------------------
       - name: Enable Firefox sandbox
         shell: bash
         run: |
           set -euxo pipefail
 
-          FILE="x11-packages/firefox/mozconfig.cfg"
-
-          echo "Before:"
-          grep -n sandbox "$FILE"
-
-          grep -q '^ac_add_options --disable-sandbox$' "$FILE"
+          MOZCONFIG="x11-packages/firefox/mozconfig.cfg"
 
           sed -i \
             's/^ac_add_options --disable-sandbox$/ac_add_options --enable-sandbox/' \
-            "$FILE"
+            "$MOZCONFIG"
 
-          echo "After:"
-          grep -n sandbox "$FILE"
+          echo "Sandbox setting after patch:"
+          grep -n 'sandbox' "$MOZCONFIG"
+
+          grep -q '^ac_add_options --enable-sandbox$' "$MOZCONFIG"
 
           echo
-          echo "Diff:"
-          git diff -- "$FILE"
+          echo "Patch:"
+          git diff -- "$MOZCONFIG"
 
-          grep -q '^ac_add_options --enable-sandbox$' "$FILE"
+          git diff -- "$MOZCONFIG" > firefox-sandbox.patch
 
+          # Ensure that this experiment changes only what we expect.
+          test "$(git diff --numstat "$MOZCONFIG" | awk '{print $1+$2}')" = "2"
+
+      # ------------------------------------------------------------
+      # 4. Firefox is a large package. Termux's own CI uses 16G zram.
+      # ------------------------------------------------------------
       - name: Enable zram
         uses: ./.github/actions/zram
         with:
@@ -60,56 +93,219 @@ jobs:
           priority: 100
           device_name: /dev/zram0
 
-      - name: Load Termux builder
+      # ------------------------------------------------------------
+      # 5. Pull official Termux builder.
+      #
+      #    GHCR occasionally resets large layer downloads, so retry.
+      #    If GHCR remains unavailable, build the builder image from
+      #    the current upstream scripts/Dockerfile.
+      # ------------------------------------------------------------
+      - name: Prepare Termux Docker builder
+        shell: bash
         run: |
+          set -euo pipefail
+
+          IMAGE="ghcr.io/termux/package-builder:latest"
+          PULLED=0
+
+          for attempt in 1 2 3 4 5; do
+            echo
+            echo "========================================"
+            echo "Docker pull attempt ${attempt}/5"
+            echo "========================================"
+
+            if docker pull "$IMAGE"; then
+              PULLED=1
+              break
+            fi
+
+            echo "Docker pull failed."
+
+            if [ "$attempt" -lt 5 ]; then
+              delay=$((attempt * 15))
+              echo "Retrying after ${delay}s..."
+              sleep "$delay"
+            fi
+          done
+
+          if [ "$PULLED" -ne 1 ]; then
+            echo
+            echo "========================================"
+            echo "GHCR pull repeatedly failed."
+            echo "Building Termux builder locally."
+            echo "========================================"
+
+            docker build \
+              --tag "$IMAGE" \
+              scripts/
+          fi
+
+          echo
+          echo "Builder image:"
+          docker image inspect "$IMAGE" \
+            --format 'ID={{.Id}} Size={{.Size}} Created={{.Created}}'
+
+      # ------------------------------------------------------------
+      # 6. Create/start the official Termux builder container.
+      #
+      #    Do this BEFORE free-space.sh. The Termux script explicitly
+      #    removes compressed containerd blobs after Docker has inflated
+      #    the image.
+      # ------------------------------------------------------------
+      - name: Start Termux builder
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          # Defensive cleanup in case this workflow is later used on a
+          # persistent/self-hosted runner.
+          docker rm -f termux-package-builder 2>/dev/null || true
+
           ./scripts/run-docker.sh true
 
-      - name: Free disk space
+          echo
+          docker ps -a
+          docker image ls
+
+      # ------------------------------------------------------------
+      # 7. Reclaim GitHub runner disk space.
+      #
+      #    Termux's own CI does this for large packages.
+      # ------------------------------------------------------------
+      - name: Free runner disk space
+        shell: bash
         run: |
-          ./scripts/free-space.sh
+          set -euxo pipefail
+
+          echo "Before:"
           df -h
 
-      - name: Build Firefox aarch64
+          ./scripts/free-space.sh
+
+          echo
+          echo "After:"
+          df -h
+
+      # ------------------------------------------------------------
+      # 8. Build only Firefox for aarch64.
+      #
+      #    -f : force Firefox build
+      #    -I : download dependencies instead of building all of them
+      # ------------------------------------------------------------
+      - name: Build Firefox
+        id: build
         shell: bash
         run: |
           set -o pipefail
 
+          echo "Starting Firefox sandbox build..."
+
           ./scripts/run-docker.sh \
             ./build-package.sh \
-            -f -I -a aarch64 firefox \
+            -f \
+            -I \
+            -a aarch64 \
+            firefox \
             2>&1 | tee firefox-build.log
 
-      - name: Collect package
+      # ------------------------------------------------------------
+      # 9. Print useful diagnostics even when the build failed.
+      # ------------------------------------------------------------
+      - name: Build diagnostics
+        if: always()
+        shell: bash
+        run: |
+          echo "========================================"
+          echo "Git diff"
+          echo "========================================"
+          git diff -- x11-packages/firefox/mozconfig.cfg || true
+
+          echo
+          echo "========================================"
+          echo "Disk space"
+          echo "========================================"
+          df -h || true
+
+          echo
+          echo "========================================"
+          echo "Docker containers"
+          echo "========================================"
+          docker ps -a || true
+
+          echo
+          echo "========================================"
+          echo "Output directory"
+          echo "========================================"
+          find output -maxdepth 2 -type f -printf '%p %k KB\n' \
+            2>/dev/null | sort || true
+
+          echo
+          echo "========================================"
+          echo "Last 150 build-log lines"
+          echo "========================================"
+          tail -n 150 firefox-build.log 2>/dev/null || true
+
+      # ------------------------------------------------------------
+      # 10. Collect successfully produced .deb files.
+      # ------------------------------------------------------------
+      - name: Collect Firefox package
         if: success()
         shell: bash
         run: |
+          set -euxo pipefail
+
           mkdir -p artifacts
 
-          echo "Build output:"
-          find output -maxdepth 1 -type f -name '*.deb' -ls || true
-
-          find output -maxdepth 1 \
+          find output \
             -type f \
             -name 'firefox_*.deb' \
+            -print \
             -exec cp -v '{}' artifacts/ ';'
 
-          test -n "$(find artifacts -type f -name 'firefox_*.deb' -print -quit)"
+          cp firefox-sandbox.patch artifacts/
 
-          sha256sum artifacts/*.deb > artifacts/SHA256SUMS
-          ls -lh artifacts
+          if ! find artifacts \
+              -maxdepth 1 \
+              -type f \
+              -name 'firefox_*.deb' \
+              -print -quit | grep -q .; then
+            echo "ERROR: Firefox .deb was not found."
+            exit 1
+          fi
 
-      - name: Upload Firefox package
+          (
+            cd artifacts
+            sha256sum firefox_*.deb > SHA256SUMS
+          )
+
+          echo
+          echo "Artifacts:"
+          ls -lh artifacts/
+
+      # ------------------------------------------------------------
+      # 11. Upload the .deb.
+      # ------------------------------------------------------------
+      - name: Upload Firefox sandbox package
         if: success()
         uses: actions/upload-artifact@v6
         with:
           name: firefox-sandbox-aarch64
           path: artifacts/
           if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
 
-      - name: Upload build log
+      # ------------------------------------------------------------
+      # 12. Always preserve the build log and patch.
+      #     This is especially useful if --enable-sandbox fails.
+      # ------------------------------------------------------------
+      - name: Upload build diagnostics
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: firefox-sandbox-build-log
-          path: firefox-build.log
+          name: firefox-sandbox-build-diagnostics
+          path: |
+            firefox-build.log
+            firefox-sandbox.patch
           if-no-files-found: ignore
+          retention-days: 7
