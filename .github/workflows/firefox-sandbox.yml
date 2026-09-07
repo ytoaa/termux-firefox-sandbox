@@ -1,0 +1,98 @@
+name: Build Firefox with Sandbox
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-firefox:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 350
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Enable Firefox sandbox
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          echo "Before:"
+          grep -n sandbox x11-packages/firefox/mozconfig.cfg
+
+          grep -q '^ac_add_options --disable-sandbox$' \
+            x11-packages/firefox/mozconfig.cfg
+
+          sed -i \
+            's/^ac_add_options --disable-sandbox$/ac_add_options --enable-sandbox/' \
+            x11-packages/firefox/mozconfig.cfg
+
+          echo "After:"
+          grep -n sandbox x11-packages/firefox/mozconfig.cfg
+
+          git diff -- x11-packages/firefox/mozconfig.cfg
+
+      - name: Enable zram
+        uses: ./.github/actions/zram
+        with:
+          algorithm: zstd
+          size: 16G
+          priority: 100
+          device_name: /dev/zram0
+
+      - name: Load Termux builder
+        run: |
+          ./scripts/run-docker.sh true
+
+      - name: Free disk space
+        run: |
+          ./scripts/free-space.sh
+          df -h
+
+      - name: Build Firefox aarch64
+        shell: bash
+        run: |
+          set -o pipefail
+
+          ./scripts/run-docker.sh \
+            ./build-package.sh \
+            -f -I -a aarch64 firefox \
+            2>&1 | tee firefox-build.log
+
+      - name: Collect package
+        if: success()
+        shell: bash
+        run: |
+          mkdir -p artifacts
+
+          find . -type f \
+            -name 'firefox_*.deb' \
+            -print \
+            -exec cp -v '{}' artifacts/ ';'
+
+          echo
+          echo "Artifacts:"
+          ls -lh artifacts/
+
+          test -n "$(find artifacts -type f -name 'firefox_*.deb' -print -quit)"
+
+          sha256sum artifacts/*.deb > artifacts/SHA256SUMS
+
+      - name: Upload Firefox package
+        if: success()
+        uses: actions/upload-artifact@v6
+        with:
+          name: firefox-sandbox-aarch64
+          path: artifacts/
+          if-no-files-found: error
+
+      - name: Upload build log
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: firefox-sandbox-build-log
+          path: firefox-build.log
+          if-no-files-found: ignore
