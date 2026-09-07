@@ -21,7 +21,7 @@ jobs:
 
     steps:
       # ============================================================
-      # 1. Checkout current upstream Termux packages
+      # 1. Checkout latest upstream Termux packages
       # ============================================================
       - name: Checkout termux-packages
         uses: actions/checkout@v7
@@ -31,7 +31,7 @@ jobs:
           fetch-depth: 1
 
       # ============================================================
-      # 2. Verify Firefox recipe
+      # 2. Verify current Firefox recipe
       # ============================================================
       - name: Verify Firefox recipe
         shell: bash
@@ -61,17 +61,29 @@ jobs:
 
           echo
           echo "======================================"
-          echo "Current sandbox config"
+          echo "Current sandbox configuration"
           echo "======================================"
 
           grep -n 'sandbox' "$MOZCONFIG"
 
-          # If upstream changes this unexpectedly,
-          # fail instead of generating an unknown package.
+          # Fail safely if upstream changes its default unexpectedly.
           grep -q '^ac_add_options --disable-sandbox$' "$MOZCONFIG"
 
       # ============================================================
-      # 3. Enable Firefox sandbox + sccache
+      # 3. Enable Firefox sandbox
+      #
+      # Also:
+      #
+      # --disable-forkserver
+      #
+      # Termux makes the Android/Bionic target appear as GNU/Linux
+      # to Mozilla. This enables the Linux forkserver by default.
+      #
+      # With MOZ_SANDBOX enabled that brings in Mozilla's
+      # pthread_atfork interposer, which collides with Bionic's
+      # crtbegin_dynamic.o pthread_atfork symbol.
+      #
+      # The forkserver is not required for the seccomp sandbox itself.
       # ============================================================
       - name: Enable Firefox sandbox
         shell: bash
@@ -84,6 +96,10 @@ jobs:
             's/^ac_add_options --disable-sandbox$/ac_add_options --enable-sandbox/' \
             "$MOZCONFIG"
 
+          if ! grep -q '^ac_add_options --disable-forkserver$' "$MOZCONFIG"; then
+            echo 'ac_add_options --disable-forkserver' >> "$MOZCONFIG"
+          fi
+
           if ! grep -q '^ac_add_options --with-ccache=sccache$' "$MOZCONFIG"; then
             echo 'ac_add_options --with-ccache=sccache' >> "$MOZCONFIG"
           fi
@@ -92,22 +108,23 @@ jobs:
           echo "Modified mozconfig"
           echo "======================================"
 
-          grep -nE 'sandbox|ccache' "$MOZCONFIG"
+          grep -nE 'sandbox|forkserver|ccache' "$MOZCONFIG"
 
           grep -q '^ac_add_options --enable-sandbox$' "$MOZCONFIG"
+          grep -q '^ac_add_options --disable-forkserver$' "$MOZCONFIG"
           grep -q '^ac_add_options --with-ccache=sccache$' "$MOZCONFIG"
 
       # ============================================================
-      # 4. Termux/Bionic compatibility patch
+      # 4. Termux/Bionic compatibility patch for Linux sandbox
       #
       # Fix 1:
-      #   <time.h> for struct timespec
+      #   SandboxReporterCommon.h needs <time.h> for struct timespec.
       #
       # Fix 2:
-      #   disable pthread priority inheritance path on Termux
+      #   Disable Chromium priority-inheritance mutex path on Termux.
       #
       # Fix 3:
-      #   skip glibc-specific shm_open lazy initializer
+      #   Skip glibc-specific shm_open lazy initialization on Bionic.
       # ============================================================
       - name: Add Termux sandbox compatibility patch
         shell: bash
@@ -170,7 +187,7 @@ jobs:
              // make sure rprofiler pointers are properly initialized (and send a marker
           PATCH
 
-          # Allow git diff to show the new untracked patch.
+          # Show new file in git diff without committing it.
           git add -N "$PATCH"
 
           echo "======================================"
@@ -180,7 +197,7 @@ jobs:
           cat "$PATCH"
 
       # ============================================================
-      # 5. Increase custom package revision
+      # 5. Increase our Firefox package revision
       #
       # official:
       #   155.0.1
@@ -244,7 +261,7 @@ jobs:
           PY
 
           echo "======================================"
-          echo "Custom Firefox version"
+          echo "Custom Firefox package"
           echo "======================================"
 
           grep '^TERMUX_PKG_VERSION=' \
@@ -254,7 +271,7 @@ jobs:
             x11-packages/firefox/build.sh
 
       # ============================================================
-      # 6. Save all package modifications
+      # 6. Save complete source modifications
       # ============================================================
       - name: Save custom changes
         shell: bash
@@ -272,21 +289,24 @@ jobs:
           git status --short x11-packages/firefox/
 
       # ============================================================
-      # 7. Restore persistent sccache
+      # 7. Restore previous sccache
       #
-      # Each run gets a unique key so the new cache can be saved.
-      # restore-keys will retrieve the newest previous cache.
+      # restore and save are deliberately separated.
+      #
+      # This means the cache can be saved even if Firefox compilation
+      # fails later.
       # ============================================================
       - name: Restore Firefox sccache
-        uses: actions/cache@v4
+        id: sccache-restore
+        uses: actions/cache/restore@v4
         with:
           path: .sccache
-          key: firefox-sccache-aarch64-v4-${{ github.run_id }}
+          key: firefox-sccache-aarch64-v5-${{ github.run_id }}
           restore-keys: |
-            firefox-sccache-aarch64-v4-
+            firefox-sccache-aarch64-v5-
 
       # ============================================================
-      # 8. Prepare host-side cache directory
+      # 8. Prepare host-side compiler cache
       # ============================================================
       - name: Prepare sccache directory
         shell: bash
@@ -295,22 +315,21 @@ jobs:
 
           mkdir -p .sccache
 
-          # Cache contents restored by actions/cache may have
-          # restrictive permissions.
-          sudo chown -R "$(id -u):$(id -g)" .sccache
+          sudo chown -R \
+            "$(id -u):$(id -g)" \
+            .sccache
 
           chmod -R a+rwX .sccache
 
           echo "======================================"
-          echo "Host sccache directory"
+          echo "Host sccache"
           echo "======================================"
 
           ls -ld .sccache
+          du -sh .sccache || true
 
       # ============================================================
       # 9. Enable zram
-      #
-      # Same 16G size used by upstream Termux CI for large builds.
       # ============================================================
       - name: Enable zram
         uses: ./.github/actions/zram
@@ -321,11 +340,11 @@ jobs:
           device_name: /dev/zram0
 
       # ============================================================
-      # 10. Prepare official Termux Docker builder
+      # 10. Prepare official Termux package builder
       #
-      # Retry GHCR because GitHub occasionally resets downloads.
+      # GHCR occasionally resets large layer downloads, so retry.
       #
-      # If all pulls fail, build upstream builder locally.
+      # If all retries fail, build upstream builder locally.
       # ============================================================
       - name: Prepare official Termux builder
         shell: bash
@@ -333,7 +352,6 @@ jobs:
           set -euo pipefail
 
           BASE_IMAGE="ghcr.io/termux/package-builder:latest"
-
           PULLED=0
 
           for attempt in 1 2 3 4 5; do
@@ -377,15 +395,16 @@ jobs:
           echo "Official builder"
           echo "======================================"
 
-          docker image inspect "$BASE_IMAGE" \
+          docker image inspect \
+            "$BASE_IMAGE" \
             --format \
             'ID={{.Id}} Size={{.Size}} Created={{.Created}}'
 
       # ============================================================
-      # 11. Build derived Firefox builder containing sccache
+      # 11. Create derived builder containing sccache
       #
-      # sccache is installed here as root, before Termux restricted
-      # AppArmor is applied.
+      # Installing it here avoids sudo inside Termux's restricted
+      # AppArmor environment.
       # ============================================================
       - name: Build Firefox builder with sccache
         shell: bash
@@ -426,22 +445,20 @@ jobs:
             'ID={{.Id}} Size={{.Size}} Created={{.Created}}'
 
       # ============================================================
-      # 12. Create Termux builder container
+      # 12. Create builder container
       #
-      # IMPORTANT:
+      # We cannot put sccache under:
       #
-      # /home/builder/termux-packages/.sccache
-      # cannot be used because Termux restricted AppArmor denies
-      # writes to most of the repository tree.
+      # /home/builder/termux-packages/
       #
-      # Therefore:
+      # because Termux's restricted AppArmor profile prevents writes
+      # to most of that tree.
       #
-      # host:
+      # Host:
       #   $GITHUB_WORKSPACE/.sccache
       #
-      # container:
+      # Container:
       #   /home/builder/.cache/sccache
-      #
       # ============================================================
       - name: Start Termux builder
         shell: bash
@@ -470,10 +487,11 @@ jobs:
 
           docker inspect \
             termux-package-builder \
-            --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+            --format \
+            '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
 
       # ============================================================
-      # 13. Verify sccache binary
+      # 13. Verify sccache binary exists
       # ============================================================
       - name: Verify sccache
         shell: bash
@@ -484,20 +502,15 @@ jobs:
             set -e
 
             echo "======================================"
-            echo "sccache binary"
+            echo "sccache"
             echo "======================================"
 
             command -v sccache
-
             sccache --version
           '
 
       # ============================================================
-      # 14. Verify cache directory is writable inside restricted
-      #     Termux builder
-      #
-      # This prevents another hour-long build from starting if the
-      # mount/AppArmor configuration is wrong.
+      # 14. Verify cache is writable before starting a huge build
       # ============================================================
       - name: Verify sccache cache access
         shell: bash
@@ -511,7 +524,7 @@ jobs:
             export SCCACHE_CACHE_SIZE=6G
 
             echo "======================================"
-            echo "Identity"
+            echo "Builder identity"
             echo "======================================"
 
             id
@@ -525,13 +538,12 @@ jobs:
 
             echo
             echo "======================================"
-            echo "Write test"
+            echo "Cache write test"
             echo "======================================"
 
             touch "$SCCACHE_DIR/.write-test"
 
-            echo "test" \
-              > "$SCCACHE_DIR/.write-test"
+            echo "test" > "$SCCACHE_DIR/.write-test"
 
             cat "$SCCACHE_DIR/.write-test"
 
@@ -542,9 +554,8 @@ jobs:
           '
 
       # ============================================================
-      # 15. Patch current upstream free-space.sh
-      #
-      # Ubuntu 26.04 runner does not have ruby3.2-doc anymore.
+      # 15. Work around current Termux free-space.sh Ubuntu 26.04
+      #     ruby3.2-doc issue
       # ============================================================
       - name: Patch Termux free-space script
         shell: bash
@@ -554,7 +565,7 @@ jobs:
           SCRIPT="scripts/free-space.sh"
 
           echo "======================================"
-          echo "ruby3.2-doc before"
+          echo "ruby3.2-doc before patch"
           echo "======================================"
 
           grep -n 'ruby3.2-doc' "$SCRIPT" || true
@@ -565,21 +576,21 @@ jobs:
 
           echo
           echo "======================================"
-          echo "ruby3.2-doc after"
+          echo "ruby3.2-doc after patch"
           echo "======================================"
 
           if grep -n 'ruby3.2-doc' "$SCRIPT"; then
-            echo "ERROR: ruby3.2-doc still exists"
+            echo "ERROR: ruby3.2-doc still present"
             exit 1
           fi
 
           echo "ruby3.2-doc removed."
 
       # ============================================================
-      # 16. Free GitHub runner disk space
+      # 16. Free runner disk space
       #
-      # Docker builder/container are already created before this
-      # because free-space.sh removes containerd cached layer data.
+      # Docker builder/container have already been created before
+      # this script deletes containerd cached blobs.
       # ============================================================
       - name: Free runner disk space
         shell: bash
@@ -602,7 +613,7 @@ jobs:
           df -h
 
       # ============================================================
-      # 17. Reset sccache stats
+      # 17. Reset compiler-cache statistics
       # ============================================================
       - name: Reset sccache statistics
         shell: bash
@@ -618,14 +629,11 @@ jobs:
       # ============================================================
       # 18. Build Firefox
       #
-      # -f:
-      #   force Firefox package itself to build
-      #
-      # -I:
-      #   install dependencies from Termux repository rather than
-      #   rebuilding every dependency
+      # -f : force Firefox itself
+      # -I : install dependencies from Termux repository
       # ============================================================
       - name: Build Firefox
+        id: build-firefox
         shell: bash
         run: |
           set -o pipefail
@@ -646,7 +654,7 @@ jobs:
             2>&1 | tee firefox-build.log
 
       # ============================================================
-      # 19. Show sccache statistics
+      # 19. Show cache statistics regardless of build result
       # ============================================================
       - name: Show sccache statistics
         if: always()
@@ -687,16 +695,15 @@ jobs:
 
           echo
           echo "======================================"
-          echo "sccache host directory"
+          echo "sccache directory"
           echo "======================================"
 
-          du -sh .sccache 2>/dev/null || true
-          find .sccache -maxdepth 2 -type d \
-            2>/dev/null | head -n 30 || true
+          du -sh .sccache \
+            2>/dev/null || true
 
           echo
           echo "======================================"
-          echo "Generated DEB files"
+          echo "Generated DEBs"
           echo "======================================"
 
           find output \
@@ -713,15 +720,42 @@ jobs:
 
           echo
           echo "======================================"
-          echo "Last 300 Firefox build lines"
+          echo "Sandbox build markers"
           echo "======================================"
 
-          tail -n 300 \
+          grep -nE \
+            'security/sandbox|libmozsandbox|pthread_atfork|ld\.lld: error|undefined symbol|duplicate symbol' \
+            firefox-build.log \
+            2>/dev/null \
+            | tail -n 100 || true
+
+          echo
+          echo "======================================"
+          echo "Last 350 Firefox build lines"
+          echo "======================================"
+
+          tail -n 350 \
             firefox-build.log \
             2>/dev/null || true
 
       # ============================================================
-      # 21. Collect successful Firefox package
+      # 21. Save sccache EVEN WHEN BUILD FAILS
+      #
+      # This is important for iterative sandbox porting.
+      #
+      # A unique run_id key is used so the cache can be written.
+      # The next run restores the newest v5 cache through
+      # restore-keys.
+      # ============================================================
+      - name: Save Firefox sccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: .sccache
+          key: firefox-sccache-aarch64-v5-${{ github.run_id }}
+
+      # ============================================================
+      # 22. Collect successful package
       # ============================================================
       - name: Collect Firefox package
         if: success()
@@ -777,7 +811,7 @@ jobs:
           ls -lh artifacts/
 
       # ============================================================
-      # 22. Upload successful package
+      # 23. Upload successful Firefox package
       # ============================================================
       - name: Upload Firefox sandbox package
         if: success()
@@ -790,7 +824,7 @@ jobs:
           retention-days: 14
 
       # ============================================================
-      # 23. Always upload failure diagnostics
+      # 24. Always keep failure diagnostics
       # ============================================================
       - name: Upload build diagnostics
         if: always()
