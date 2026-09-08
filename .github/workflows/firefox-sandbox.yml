@@ -117,15 +117,20 @@ jobs:
           path = Path("x11-packages/firefox/build.sh")
           text = path.read_text()
 
+          # --------------------------------------------------------
+          # Add libandroid-glob.
+          # --------------------------------------------------------
           m = re.search(
               r'^TERMUX_PKG_DEPENDS="([^"]*)"$',
               text,
               flags=re.MULTILINE,
           )
+
           if not m:
               raise SystemExit("TERMUX_PKG_DEPENDS not found")
 
           deps = [x.strip() for x in m.group(1).split(",")]
+
           if "libandroid-glob" not in deps:
               try:
                   pos = deps.index("libandroid-shmem") + 1
@@ -133,13 +138,27 @@ jobs:
                   pos = len(deps)
 
               deps.insert(pos, "libandroid-glob")
-              new_line = 'TERMUX_PKG_DEPENDS="' + ", ".join(deps) + '"'
-              text = text[:m.start()] + new_line + text[m.end():]
 
+              new_line = (
+                  'TERMUX_PKG_DEPENDS="'
+                  + ", ".join(deps)
+                  + '"'
+              )
+
+              text = (
+                  text[:m.start()]
+                  + new_line
+                  + text[m.end():]
+              )
+
+          # --------------------------------------------------------
+          # Add libandroid-glob linker dependency.
+          # --------------------------------------------------------
           old_ldflags = (
               'LDFLAGS+=" -landroid-shmem '
               '-landroid-spawn -llog"'
           )
+
           new_ldflags = (
               'LDFLAGS+=" -landroid-shmem '
               '-landroid-spawn -landroid-glob -llog"'
@@ -147,13 +166,25 @@ jobs:
 
           if new_ldflags not in text:
               if old_ldflags not in text:
-                  raise SystemExit("Expected Firefox LDFLAGS line not found")
-              text = text.replace(old_ldflags, new_ldflags, 1)
+                  raise SystemExit(
+                      "Expected Firefox LDFLAGS line not found"
+                  )
 
+              text = text.replace(
+                  old_ldflags,
+                  new_ldflags,
+                  1,
+              )
+
+          # --------------------------------------------------------
+          # Insert native-sandbox preflight.
+          # --------------------------------------------------------
           marker = "termux_step_pre_configure() {\n\ttermux_setup_nodejs\n"
 
           if marker not in text:
-              raise SystemExit("termux_step_pre_configure marker not found")
+              raise SystemExit(
+                  "termux_step_pre_configure marker not found"
+              )
 
           preflight = r'''termux_step_pre_configure() {
           \techo "======================================"
@@ -271,6 +302,7 @@ jobs:
 
           \techo
           \techo "API24 glob/globfree target link test: SUCCESS"
+
           \t"$READELF" -d "$_glob_so" || true
 
           \techo
@@ -292,8 +324,19 @@ jobs:
           \ttermux_setup_nodejs
           '''
 
-          text = text.replace(marker, preflight, 1)
+          # Keep the raw string so shell '\' continuation characters are
+          # preserved, but convert our explicit \t markers to real tabs.
+          preflight = preflight.replace(r"\t", "\t")
 
+          text = text.replace(
+              marker,
+              preflight,
+              1,
+          )
+
+          # --------------------------------------------------------
+          # Package revision +1.
+          # --------------------------------------------------------
           revision = re.search(
               r"^TERMUX_PKG_REVISION=(\d+)\s*$",
               text,
@@ -303,19 +346,24 @@ jobs:
           if revision:
               old_revision = int(revision.group(1))
               new_revision = old_revision + 1
+
               text = (
                   text[:revision.start()]
                   + f"TERMUX_PKG_REVISION={new_revision}"
                   + text[revision.end():]
               )
+
           else:
               version = re.search(
                   r"^TERMUX_PKG_VERSION=.*$",
                   text,
                   flags=re.MULTILINE,
               )
+
               if not version:
-                  raise SystemExit("TERMUX_PKG_VERSION not found")
+                  raise SystemExit(
+                      "TERMUX_PKG_VERSION not found"
+                  )
 
               text = (
                   text[:version.end()]
@@ -326,15 +374,43 @@ jobs:
           path.write_text(text)
           PY
 
-          grep '^TERMUX_PKG_VERSION=' x11-packages/firefox/build.sh
-          grep '^TERMUX_PKG_REVISION=' x11-packages/firefox/build.sh
-          grep '^TERMUX_PKG_DEPENDS=' x11-packages/firefox/build.sh
-          grep -n 'LDFLAGS+=' x11-packages/firefox/build.sh
-          grep -n 'Firefox native sandbox Termux/Bionic preflight' \
+          echo "======================================"
+          echo "Modified build.sh"
+          echo "======================================"
+
+          grep '^TERMUX_PKG_VERSION=' \
+            x11-packages/firefox/build.sh
+
+          grep '^TERMUX_PKG_REVISION=' \
+            x11-packages/firefox/build.sh
+
+          grep '^TERMUX_PKG_DEPENDS=' \
+            x11-packages/firefox/build.sh
+
+          grep -n 'LDFLAGS+=' \
+            x11-packages/firefox/build.sh
+
+          grep -n \
+            'Firefox native sandbox Termux/Bionic preflight' \
             x11-packages/firefox/build.sh
 
       # ============================================================
       # 5. Add Termux/Bionic native sandbox port patch
+      #
+      # Existing compatibility work:
+      # - time.h / timespec
+      # - pthread PI
+      # - glibc shm_open initializer
+      # - Termux broker prefix
+      # - ld.so.conf
+      #
+      # Native sandbox bring-up:
+      # - Termux is DESKTOP for Firefox process policy topology
+      # - ANDROID/Bionic remains defined
+      # - PR_GET_DUMPABLE
+      # - PR_PAC_RESET_KEYS(APIAKEY)
+      # - MREMAP_MAYMOVE|MREMAP_FIXED for Bionic linker CFI
+      # - desktop-style content socket policy on Termux
       # ============================================================
       - name: Add Termux native sandbox port patch
         shell: bash
@@ -497,6 +573,10 @@ jobs:
 
           git add -N "$PATCH"
 
+          echo "======================================"
+          echo "Native sandbox port patch"
+          echo "======================================"
+
           cat "$PATCH"
 
       # ============================================================
@@ -515,7 +595,9 @@ jobs:
           grep -q '^ac_add_options --disable-forkserver$' "$MOZCONFIG"
           grep -q '^ac_add_options --with-ccache=sccache$' "$MOZCONFIG"
 
-          grep '^TERMUX_PKG_DEPENDS=' "$BUILD_SH" | grep -q 'libandroid-glob'
+          grep '^TERMUX_PKG_DEPENDS=' "$BUILD_SH" \
+            | grep -q 'libandroid-glob'
+
           grep -q -- '-landroid-glob' "$BUILD_SH"
 
           grep -q 'SandboxReporterCommon.h' "$PATCH"
@@ -527,14 +609,40 @@ jobs:
           grep -q 'PR_PAC_RESET_KEYS' "$PATCH"
           grep -q 'PR_GET_DUMPABLE' "$PATCH"
           grep -q 'MREMAP_MAYMOVE | MREMAP_FIXED' "$PATCH"
-          grep -q '#if !defined(ANDROID) || defined(__TERMUX__)' "$PATCH"
-          grep -q '#if defined(ANDROID) && !defined(__TERMUX__)' "$PATCH"
 
-          grep -q '/data/data/com.termux/files/usr/lib' "$PATCH"
-          grep -q '/data/data/com.termux/files/usr/etc' "$PATCH"
-          grep -q '/data/data/com.termux/files/usr/share' "$PATCH"
+          grep -q \
+            '#if !defined(ANDROID) || defined(__TERMUX__)' \
+            "$PATCH"
 
-          git diff --check
+          grep -q \
+            '#if defined(ANDROID) && !defined(__TERMUX__)' \
+            "$PATCH"
+
+          grep -q \
+            '/data/data/com.termux/files/usr/lib' \
+            "$PATCH"
+
+          grep -q \
+            '/data/data/com.termux/files/usr/etc' \
+            "$PATCH"
+
+          grep -q \
+            '/data/data/com.termux/files/usr/share' \
+            "$PATCH"
+
+          # IMPORTANT:
+          #
+          # 9999-termux-native-sandbox.patch is itself a unified diff.
+          # A valid unified diff uses a single leading space on blank
+          # context lines. Since git add -N marks this patch file as a
+          # newly-added text file, a global `git diff --check` would
+          # incorrectly report those context-prefix spaces as trailing
+          # whitespace.
+          #
+          # Therefore check only the directly modified recipe/config.
+          git diff --check -- \
+            x11-packages/firefox/build.sh \
+            x11-packages/firefox/mozconfig.cfg
 
           echo
           echo "Recipe preflight: SUCCESS"
@@ -549,6 +657,7 @@ jobs:
 
           cat > termux-firefox-native-sandbox-test.sh <<'SCRIPT'
           #!/data/data/com.termux/files/usr/bin/bash
+
           set -u
 
           LEVEL="${FIREFOX_SANDBOX_LEVEL:-3}"
@@ -570,26 +679,37 @@ jobs:
           echo "level   : $LEVEL"
           echo "profile : $PROFILE"
           echo "log     : $LOG"
-          echo "aux off : $DISABLE_AUX (socket/RDD sandbox isolation for first bring-up)"
+          echo "aux off : $DISABLE_AUX"
           echo
 
           uname -a || true
-          getprop ro.build.version.release 2>/dev/null || true
-          getprop ro.build.version.sdk 2>/dev/null || true
 
+          getprop \
+            ro.build.version.release \
+            2>/dev/null || true
+
+          getprop \
+            ro.build.version.sdk \
+            2>/dev/null || true
+
+          # First bring-up isolates the content sandbox by temporarily
+          # disabling Socket/RDD sandboxing.
           if [ "$DISABLE_AUX" = "1" ]; then
             export MOZ_DISABLE_SOCKET_PROCESS_SANDBOX=1
             export MOZ_DISABLE_RDD_SANDBOX=1
           fi
 
           set +e
+
           MOZ_SANDBOX_LOGGING=1 \
             firefox \
               --no-remote \
               --profile "$PROFILE" \
               about:blank \
               2>&1 | tee "$LOG"
+
           rc=${PIPESTATUS[0]}
+
           set -e
 
           echo
@@ -604,10 +724,12 @@ jobs:
 
           echo
           echo "Firefox exit code: $rc"
+
           exit "$rc"
           SCRIPT
 
-          chmod +x termux-firefox-native-sandbox-test.sh
+          chmod +x \
+            termux-firefox-native-sandbox-test.sh
 
       # ============================================================
       # 8. Save recipe diff
@@ -620,7 +742,13 @@ jobs:
           git diff -- x11-packages/firefox/ \
             | tee firefox-native-sandbox-changes.diff
 
-          git status --short x11-packages/firefox/
+          echo
+          echo "======================================"
+          echo "Git status"
+          echo "======================================"
+
+          git status --short \
+            x11-packages/firefox/
 
       # ============================================================
       # 9. Restore compiler cache
@@ -643,8 +771,17 @@ jobs:
           set -euxo pipefail
 
           mkdir -p .sccache
-          sudo chown -R "$(id -u):$(id -g)" .sccache
-          chmod -R a+rwX .sccache
+
+          sudo chown -R \
+            "$(id -u):$(id -g)" \
+            .sccache
+
+          chmod -R a+rwX \
+            .sccache
+
+          echo "======================================"
+          echo "Host sccache"
+          echo "======================================"
 
           ls -ld .sccache
           du -sh .sccache || true
@@ -684,7 +821,10 @@ jobs:
 
             if [ "$attempt" -lt 5 ]; then
               delay=$((attempt * 15))
-              echo "Pull failed. Retrying in ${delay}s..."
+
+              echo "Pull failed."
+              echo "Retrying in ${delay}s..."
+
               sleep "$delay"
             fi
           done
@@ -692,7 +832,8 @@ jobs:
           if [ "$PULLED" -ne 1 ]; then
             echo
             echo "======================================"
-            echo "GHCR unavailable; building official builder"
+            echo "GHCR unavailable"
+            echo "Building official Termux builder"
             echo "======================================"
 
             docker build \
@@ -704,7 +845,8 @@ jobs:
 
           docker image inspect \
             "$BASE_IMAGE" \
-            --format 'ID={{.Id}} Size={{.Size}} Created={{.Created}}'
+            --format \
+            'ID={{.Id}} Size={{.Size}} Created={{.Created}}'
 
       # ============================================================
       # 13. Derive builder with sccache
@@ -728,6 +870,7 @@ jobs:
               && rm -rf /var/lib/apt/lists/*
 
           USER builder:builder
+
           WORKDIR /home/builder/termux-packages
           DOCKERFILE
 
@@ -736,9 +879,15 @@ jobs:
             -t "$TERMUX_BUILDER_IMAGE_NAME" \
             .
 
+          echo
+          echo "======================================"
+          echo "Derived builder"
+          echo "======================================"
+
           docker image inspect \
             "$TERMUX_BUILDER_IMAGE_NAME" \
-            --format 'ID={{.Id}} Size={{.Size}} Created={{.Created}}'
+            --format \
+            'ID={{.Id}} Size={{.Size}} Created={{.Created}}'
 
       # ============================================================
       # 14. Start Termux builder
@@ -748,17 +897,30 @@ jobs:
         run: |
           set -euxo pipefail
 
-          docker rm -f termux-package-builder 2>/dev/null || true
+          docker rm -f \
+            termux-package-builder \
+            2>/dev/null || true
 
           export TERMUX_DOCKER_RUN_EXTRA_ARGS="--volume ${GITHUB_WORKSPACE}/.sccache:/home/builder/.cache/sccache"
 
           ./scripts/run-docker.sh true
 
+          echo
+          echo "======================================"
+          echo "Containers"
+          echo "======================================"
+
           docker ps -a
+
+          echo
+          echo "======================================"
+          echo "Container mounts"
+          echo "======================================"
 
           docker inspect \
             termux-package-builder \
-            --format '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
+            --format \
+            '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
 
       # ============================================================
       # 15. Verify sccache inside builder
@@ -774,19 +936,38 @@ jobs:
             export SCCACHE_DIR=/home/builder/.cache/sccache
             export SCCACHE_CACHE_SIZE=6G
 
+            echo "======================================"
+            echo "Builder identity"
+            echo "======================================"
+
             id
+
+            echo
+            echo "======================================"
+            echo "sccache"
+            echo "======================================"
+
             command -v sccache
             sccache --version
+
+            echo
+            echo "======================================"
+            echo "Cache directory"
+            echo "======================================"
+
             ls -ld "$SCCACHE_DIR"
 
             touch "$SCCACHE_DIR/.write-test"
             echo test > "$SCCACHE_DIR/.write-test"
             cat "$SCCACHE_DIR/.write-test"
             rm "$SCCACHE_DIR/.write-test"
+
+            echo
+            echo "Cache write test: SUCCESS"
           '
 
       # ============================================================
-      # 16. Work around current ubuntu-26.04 free-space script issue
+      # 16. Work around current ubuntu-26.04 free-space issue
       # ============================================================
       - name: Patch Termux free-space script
         shell: bash
@@ -795,13 +976,22 @@ jobs:
 
           SCRIPT="scripts/free-space.sh"
 
-          grep -n 'ruby3.2-doc' "$SCRIPT" || true
-          sed -i '/ruby3\.2-doc/d' "$SCRIPT"
+          grep -n \
+            'ruby3.2-doc' \
+            "$SCRIPT" || true
 
-          if grep -q 'ruby3.2-doc' "$SCRIPT"; then
+          sed -i \
+            '/ruby3\.2-doc/d' \
+            "$SCRIPT"
+
+          if grep -q \
+            'ruby3.2-doc' \
+            "$SCRIPT"; then
             echo "ERROR: ruby3.2-doc still present"
             exit 1
           fi
+
+          echo "ruby3.2-doc removed."
 
       # ============================================================
       # 17. Free GitHub runner disk space
@@ -814,6 +1004,7 @@ jobs:
           echo "======================================"
           echo "Disk before cleanup"
           echo "======================================"
+
           df -h
 
           ./scripts/free-space.sh
@@ -822,6 +1013,7 @@ jobs:
           echo "======================================"
           echo "Disk after cleanup"
           echo "======================================"
+
           df -h
 
       # ============================================================
@@ -885,25 +1077,32 @@ jobs:
           echo "======================================"
           echo "Firefox modifications"
           echo "======================================"
-          git diff -- x11-packages/firefox/ || true
+
+          git diff -- \
+            x11-packages/firefox/ || true
 
           echo
           echo "======================================"
           echo "Disk"
           echo "======================================"
+
           df -h || true
 
           echo
           echo "======================================"
           echo "Docker"
           echo "======================================"
+
           docker ps -a || true
 
           echo
           echo "======================================"
           echo "sccache size"
           echo "======================================"
-          du -sh .sccache 2>/dev/null || true
+
+          du -sh \
+            .sccache \
+            2>/dev/null || true
 
           echo
           echo "======================================"
@@ -920,6 +1119,7 @@ jobs:
           echo "======================================"
           echo "Generated DEB files"
           echo "======================================"
+
           find output \
             -type f \
             -name 'firefox_*.deb' \
@@ -930,7 +1130,10 @@ jobs:
           echo "======================================"
           echo "Last 500 Firefox build lines"
           echo "======================================"
-          tail -n 500 firefox-build.log 2>/dev/null || true
+
+          tail -n 500 \
+            firefox-build.log \
+            2>/dev/null || true
 
       # ============================================================
       # 22. Save sccache regardless of success/failure
@@ -959,9 +1162,17 @@ jobs:
             -print \
             -exec cp -v '{}' artifacts/ ';'
 
-          cp firefox-native-sandbox-changes.diff artifacts/
-          cp x11-packages/firefox/9999-termux-native-sandbox.patch artifacts/
-          cp termux-firefox-native-sandbox-test.sh artifacts/
+          cp \
+            firefox-native-sandbox-changes.diff \
+            artifacts/
+
+          cp \
+            x11-packages/firefox/9999-termux-native-sandbox.patch \
+            artifacts/
+
+          cp \
+            termux-firefox-native-sandbox-test.sh \
+            artifacts/
 
           DEB="$(
             find artifacts \
@@ -978,8 +1189,16 @@ jobs:
 
           (
             cd artifacts
-            sha256sum firefox_*.deb > SHA256SUMS
+
+            sha256sum \
+              firefox_*.deb \
+              > SHA256SUMS
           )
+
+          echo
+          echo "======================================"
+          echo "Final Firefox artifacts"
+          echo "======================================"
 
           ls -lh artifacts/
 
