@@ -21,7 +21,7 @@ jobs:
 
     steps:
       # ============================================================
-      # 1. Checkout latest upstream Termux packages
+      # 1. Checkout current upstream Termux packages
       # ============================================================
       - name: Checkout termux-packages
         uses: actions/checkout@v7
@@ -31,7 +31,7 @@ jobs:
           fetch-depth: 1
 
       # ============================================================
-      # 2. Verify current Firefox recipe
+      # 2. Verify upstream Firefox recipe
       # ============================================================
       - name: Verify Firefox recipe
         shell: bash
@@ -39,15 +39,15 @@ jobs:
           set -euxo pipefail
 
           FIREFOX_DIR="x11-packages/firefox"
-          MOZCONFIG="$FIREFOX_DIR/mozconfig.cfg"
           BUILD_SH="$FIREFOX_DIR/build.sh"
+          MOZCONFIG="$FIREFOX_DIR/mozconfig.cfg"
 
           test -d "$FIREFOX_DIR"
-          test -f "$MOZCONFIG"
           test -f "$BUILD_SH"
+          test -f "$MOZCONFIG"
 
           echo "======================================"
-          echo "Upstream Termux commit"
+          echo "Upstream commit"
           echo "======================================"
           git rev-parse HEAD
 
@@ -61,31 +61,22 @@ jobs:
 
           echo
           echo "======================================"
-          echo "Current sandbox configuration"
+          echo "Original Firefox configuration"
           echo "======================================"
 
-          grep -n 'sandbox' "$MOZCONFIG"
+          grep -nE 'sandbox|forkserver|ccache' "$MOZCONFIG" || true
 
-          # Fail safely if upstream changes its default unexpectedly.
+          # Fail safely if upstream changes the recipe unexpectedly.
           grep -q '^ac_add_options --disable-sandbox$' "$MOZCONFIG"
 
       # ============================================================
-      # 3. Enable Firefox sandbox
+      # 3. Enable sandbox, disable forkserver, enable sccache
       #
-      # Also:
-      #
-      # --disable-forkserver
-      #
-      # Termux makes the Android/Bionic target appear as GNU/Linux
-      # to Mozilla. This enables the Linux forkserver by default.
-      #
-      # With MOZ_SANDBOX enabled that brings in Mozilla's
-      # pthread_atfork interposer, which collides with Bionic's
-      # crtbegin_dynamic.o pthread_atfork symbol.
-      #
-      # The forkserver is not required for the seccomp sandbox itself.
+      # forkserver is disabled because Termux/Bionic already gets
+      # pthread_atfork from crtbegin_dynamic.o and Mozilla's
+      # forkserver interposer caused a duplicate symbol.
       # ============================================================
-      - name: Enable Firefox sandbox
+      - name: Configure Firefox sandbox
         shell: bash
         run: |
           set -euxo pipefail
@@ -114,17 +105,301 @@ jobs:
           grep -q '^ac_add_options --disable-forkserver$' "$MOZCONFIG"
           grep -q '^ac_add_options --with-ccache=sccache$' "$MOZCONFIG"
 
+          if grep -q '^ac_add_options --disable-sandbox$' "$MOZCONFIG"; then
+            echo "ERROR: --disable-sandbox still present"
+            exit 1
+          fi
+
       # ============================================================
-      # 4. Termux/Bionic compatibility patch for Linux sandbox
+      # 4. Modify Termux Firefox package recipe
+      #
+      # - libandroid-glob runtime/build dependency
+      # - -landroid-glob linker flag
+      # - API24 cross-link preflight before full Firefox compile
+      # - package revision +1
+      # ============================================================
+      - name: Patch Firefox package recipe
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          python3 <<'PY'
+          from pathlib import Path
+          import re
+
+          path = Path("x11-packages/firefox/build.sh")
+          text = path.read_text()
+
+          # --------------------------------------------------------
+          # Add libandroid-glob dependency.
+          # --------------------------------------------------------
+          m = re.search(
+              r'^TERMUX_PKG_DEPENDS="([^"]*)"$',
+              text,
+              flags=re.MULTILINE,
+          )
+
+          if not m:
+              raise SystemExit("TERMUX_PKG_DEPENDS not found")
+
+          deps = [x.strip() for x in m.group(1).split(",")]
+
+          if "libandroid-glob" not in deps:
+              try:
+                  pos = deps.index("libandroid-shmem") + 1
+              except ValueError:
+                  pos = len(deps)
+
+              deps.insert(pos, "libandroid-glob")
+
+              new_dep_line = (
+                  'TERMUX_PKG_DEPENDS="'
+                  + ", ".join(deps)
+                  + '"'
+              )
+
+              text = (
+                  text[:m.start()]
+                  + new_dep_line
+                  + text[m.end():]
+              )
+
+          # --------------------------------------------------------
+          # Add -landroid-glob to Firefox's target link flags.
+          # --------------------------------------------------------
+          old_ldflags = (
+              'LDFLAGS+=" -landroid-shmem '
+              '-landroid-spawn -llog"'
+          )
+
+          new_ldflags = (
+              'LDFLAGS+=" -landroid-shmem '
+              '-landroid-spawn -landroid-glob -llog"'
+          )
+
+          if new_ldflags not in text:
+              if old_ldflags not in text:
+                  raise SystemExit(
+                      "Expected Firefox LDFLAGS line not found"
+                  )
+
+              text = text.replace(
+                  old_ldflags,
+                  new_ldflags,
+                  1,
+              )
+
+          # --------------------------------------------------------
+          # Insert source + linker preflight after package patches
+          # have been applied and toolchain has been set up.
+          #
+          # This runs before cargo/cbindgen/Firefox compilation.
+          # --------------------------------------------------------
+          marker = """termux_step_pre_configure() {
+          \ttermux_setup_nodejs
+          """
+
+          if marker not in text:
+              raise SystemExit(
+                  "termux_step_pre_configure marker not found"
+              )
+
+          preflight = r'''termux_step_pre_configure() {
+          	echo "======================================"
+          	echo "Firefox sandbox Termux/Bionic preflight"
+          	echo "======================================"
+
+          	# Verify our source compatibility patches were applied.
+          	grep -Fq '#include <time.h>' \
+          		security/sandbox/linux/reporter/SandboxReporterCommon.h
+
+          	grep -Fq 'BUILDFLAG(IS_FUCHSIA) || defined(__TERMUX__)' \
+          		security/sandbox/chromium/base/synchronization/lock_impl_posix.cc
+
+          	grep -Fq 'RunGlibcLazyInitializers' \
+          		security/sandbox/linux/Sandbox.cpp
+
+          	grep -Fq '/data/data/com.termux/files/usr/lib' \
+          		security/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
+
+          	grep -Fq '/data/data/com.termux/files/usr/etc' \
+          		security/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
+
+          	grep -Fq '/data/data/com.termux/files/usr/share' \
+          		security/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
+
+          	echo
+          	echo "Source patch verification: SUCCESS"
+
+          	# libandroid-glob must be present after dependency setup.
+          	if [[ ! -e "$TERMUX_PREFIX/lib/libandroid-glob.so" && \
+          	      ! -e "$TERMUX_PREFIX/lib/libandroid-glob.a" ]]; then
+          		echo "ERROR: libandroid-glob is not installed"
+          		exit 1
+          	fi
+
+          	echo
+          	echo "libandroid-glob:"
+          	ls -l \
+          		"$TERMUX_PREFIX/lib/libandroid-glob.so" \
+          		"$TERMUX_PREFIX/lib/libandroid-glob.a" \
+          		2>/dev/null || true
+
+          	# ------------------------------------------------------
+          	# Real aarch64 Android target link test.
+          	#
+          	# This catches the exact class of error that previously
+          	# appeared only after ~80 minutes at libxul.so.
+          	# ------------------------------------------------------
+          	local _glob_src
+          	local _glob_so
+
+          	_glob_src="$TERMUX_PKG_TMPDIR/firefox-sandbox-glob-preflight.c"
+          	_glob_so="$TERMUX_PKG_TMPDIR/libfirefox-sandbox-glob-preflight.so"
+
+          	cat > "$_glob_src" <<'EOF'
+          #include <glob.h>
+
+          int firefox_termux_glob_preflight(void) {
+              glob_t g = {0};
+
+              int result = glob(
+                  "/__termux_firefox_sandbox_preflight_no_match__",
+                  GLOB_NOSORT,
+                  0,
+                  &g
+              );
+
+              if (result == 0) {
+                  globfree(&g);
+              }
+
+              return result;
+          }
+          EOF
+
+          	echo
+          	echo "======================================"
+          	echo "API24 glob/globfree target link test"
+          	echo "======================================"
+
+          	"$CC" \
+          		-shared \
+          		-fPIC \
+          		"$_glob_src" \
+          		-I"$TERMUX_PREFIX/include" \
+          		-L"$TERMUX_PREFIX/lib" \
+          		-Wl,--no-undefined \
+          		-landroid-glob \
+          		-o "$_glob_so"
+
+          	echo
+          	echo "Target link test: SUCCESS"
+
+          	"$READELF" -d "$_glob_so" || true
+
+          	echo
+          	echo "======================================"
+          	echo "Known Bionic-risk sandbox references"
+          	echo "======================================"
+
+          	grep -RInE \
+          		'shm_open|glob\(|globfree|pthread_mutexattr_setprotocol|pthread_atfork' \
+          		security/sandbox/linux \
+          		security/sandbox/chromium/base/synchronization \
+          		mozglue/interposers \
+          		2>/dev/null \
+          		| head -n 120 || true
+
+          	echo
+          	echo "Firefox sandbox preflight: SUCCESS"
+
+          	termux_setup_nodejs
+          '''
+
+          text = text.replace(
+              marker,
+              preflight,
+              1,
+          )
+
+          # --------------------------------------------------------
+          # Bump package revision above official Termux version.
+          # --------------------------------------------------------
+          revision = re.search(
+              r"^TERMUX_PKG_REVISION=(\d+)\s*$",
+              text,
+              flags=re.MULTILINE,
+          )
+
+          if revision:
+              old_revision = int(revision.group(1))
+              new_revision = old_revision + 1
+
+              text = (
+                  text[:revision.start()]
+                  + f"TERMUX_PKG_REVISION={new_revision}"
+                  + text[revision.end():]
+              )
+
+          else:
+              version = re.search(
+                  r"^TERMUX_PKG_VERSION=.*$",
+                  text,
+                  flags=re.MULTILINE,
+              )
+
+              if not version:
+                  raise SystemExit(
+                      "TERMUX_PKG_VERSION not found"
+                  )
+
+              text = (
+                  text[:version.end()]
+                  + "\nTERMUX_PKG_REVISION=1"
+                  + text[version.end():]
+              )
+
+          path.write_text(text)
+          PY
+
+          echo "======================================"
+          echo "Modified build.sh"
+          echo "======================================"
+
+          grep '^TERMUX_PKG_VERSION=' \
+            x11-packages/firefox/build.sh
+
+          grep '^TERMUX_PKG_REVISION=' \
+            x11-packages/firefox/build.sh
+
+          grep '^TERMUX_PKG_DEPENDS=' \
+            x11-packages/firefox/build.sh
+
+          grep -n 'LDFLAGS+=' \
+            x11-packages/firefox/build.sh
+
+          grep -n \
+            'Firefox sandbox Termux/Bionic preflight' \
+            x11-packages/firefox/build.sh
+
+      # ============================================================
+      # 5. Mozilla/Termux sandbox compatibility patch
       #
       # Fix 1:
-      #   SandboxReporterCommon.h needs <time.h> for struct timespec.
+      #   <time.h> for timespec
       #
       # Fix 2:
-      #   Disable Chromium priority-inheritance mutex path on Termux.
+      #   disable priority inheritance pthread path on Termux
       #
       # Fix 3:
-      #   Skip glibc-specific shm_open lazy initialization on Bionic.
+      #   skip glibc shm_open lazy init
+      #
+      # Fix 4:
+      #   add Termux prefix read-only paths to sandbox broker
+      #
+      # Fix 5:
+      #   skip desktop Linux ld.so.conf parsing on Termux
       # ============================================================
       - name: Add Termux sandbox compatibility patch
         shell: bash
@@ -185,9 +460,36 @@ jobs:
 
              // This will run on main thread before  it is in a signal-handler context, to
              // make sure rprofiler pointers are properly initialized (and send a marker
+
+          --- a/security/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
+          +++ b/security/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
+          @@ -500,6 +500,14 @@
+             policy->AddTree(rdonly, "/etc");
+             policy->AddTree(rdonly, "/usr/share");
+             policy->AddTree(rdonly, "/usr/local/share");
+          +
+          +#if defined(__TERMUX__)
+          +  // Termux uses an Android app-private prefix instead of
+          +  // the traditional desktop Linux filesystem layout.
+          +  policy->AddTree(rdonly, "/data/data/com.termux/files/usr/lib");
+          +  policy->AddTree(rdonly, "/data/data/com.termux/files/usr/etc");
+          +  policy->AddTree(rdonly, "/data/data/com.termux/files/usr/share");
+          +#endif
+             // Various places where fonts reside
+             policy->AddTree(rdonly, "/usr/X11R6/lib/X11/fonts");
+             policy->AddTree(rdonly, "/nix/store");
+          @@ -516,7 +524,9 @@
+             policy->AddPath(rdonly, "/usr");
+             policy->AddPath(rdonly, "/nix");
+
+          +#if !defined(__TERMUX__)
+             AddLdconfigPaths(policy);
+          +#endif
+             AddLdLibraryEnvPaths(policy);
+
+             if (!headless) {
           PATCH
 
-          # Show new file in git diff without committing it.
           git add -N "$PATCH"
 
           echo "======================================"
@@ -197,81 +499,48 @@ jobs:
           cat "$PATCH"
 
       # ============================================================
-      # 5. Increase our Firefox package revision
+      # 6. Fast recipe-level preflight
       #
-      # official:
-      #   155.0.1
-      #
-      # ours:
-      #   155.0.1-1
-      #
-      # official:
-      #   155.0.1-2
-      #
-      # ours:
-      #   155.0.1-3
+      # This runs before Docker/Firefox source build.
       # ============================================================
-      - name: Increase custom package revision
+      - name: Recipe preflight
         shell: bash
         run: |
           set -euxo pipefail
 
-          python3 <<'PY'
-          from pathlib import Path
-          import re
-
-          path = Path("x11-packages/firefox/build.sh")
-          text = path.read_text()
-
-          revision = re.search(
-              r"^TERMUX_PKG_REVISION=(\d+)\s*$",
-              text,
-              flags=re.MULTILINE,
-          )
-
-          if revision:
-              old_revision = int(revision.group(1))
-              new_revision = old_revision + 1
-
-              text = (
-                  text[:revision.start()]
-                  + f"TERMUX_PKG_REVISION={new_revision}"
-                  + text[revision.end():]
-              )
-
-          else:
-              version = re.search(
-                  r"^TERMUX_PKG_VERSION=.*$",
-                  text,
-                  flags=re.MULTILINE,
-              )
-
-              if not version:
-                  raise SystemExit(
-                      "TERMUX_PKG_VERSION not found"
-                  )
-
-              text = (
-                  text[:version.end()]
-                  + "\nTERMUX_PKG_REVISION=1"
-                  + text[version.end():]
-              )
-
-          path.write_text(text)
-          PY
+          BUILD_SH="x11-packages/firefox/build.sh"
+          MOZCONFIG="x11-packages/firefox/mozconfig.cfg"
+          PATCH="x11-packages/firefox/9999-termux-sandbox-compat.patch"
 
           echo "======================================"
-          echo "Custom Firefox package"
+          echo "Firefox recipe preflight"
           echo "======================================"
 
-          grep '^TERMUX_PKG_VERSION=' \
-            x11-packages/firefox/build.sh
+          grep -q '^ac_add_options --enable-sandbox$' "$MOZCONFIG"
+          grep -q '^ac_add_options --disable-forkserver$' "$MOZCONFIG"
+          grep -q '^ac_add_options --with-ccache=sccache$' "$MOZCONFIG"
 
-          grep '^TERMUX_PKG_REVISION=' \
-            x11-packages/firefox/build.sh
+          grep '^TERMUX_PKG_DEPENDS=' "$BUILD_SH" \
+            | grep -q 'libandroid-glob'
+
+          grep -q -- '-landroid-glob' "$BUILD_SH"
+
+          grep -q 'SandboxReporterCommon.h' "$PATCH"
+          grep -q 'lock_impl_posix.cc' "$PATCH"
+          grep -q 'RunGlibcLazyInitializers' "$PATCH"
+          grep -q 'SandboxBrokerPolicyFactory.cpp' "$PATCH"
+
+          grep -q '/data/data/com.termux/files/usr/lib' "$PATCH"
+          grep -q '/data/data/com.termux/files/usr/etc' "$PATCH"
+          grep -q '/data/data/com.termux/files/usr/share' "$PATCH"
+
+          git diff --check
+
+          echo
+          echo "Recipe preflight: SUCCESS"
 
       # ============================================================
-      # 6. Save complete source modifications
+      # 7. Save modification diff
       # ============================================================
       - name: Save custom changes
         shell: bash
@@ -289,24 +558,22 @@ jobs:
           git status --short x11-packages/firefox/
 
       # ============================================================
-      # 7. Restore previous sccache
+      # 8. Restore compiler cache
       #
-      # restore and save are deliberately separated.
-      #
-      # This means the cache can be saved even if Firefox compilation
-      # fails later.
+      # restore/save are separate so failed Firefox builds still
+      # preserve the objects compiled during that run.
       # ============================================================
       - name: Restore Firefox sccache
         id: sccache-restore
         uses: actions/cache/restore@v4
         with:
           path: .sccache
-          key: firefox-sccache-aarch64-v5-${{ github.run_id }}
+          key: firefox-sccache-aarch64-v6-${{ github.run_id }}
           restore-keys: |
-            firefox-sccache-aarch64-v5-
+            firefox-sccache-aarch64-v6-
 
       # ============================================================
-      # 8. Prepare host-side compiler cache
+      # 9. Prepare host cache
       # ============================================================
       - name: Prepare sccache directory
         shell: bash
@@ -329,7 +596,7 @@ jobs:
           du -sh .sccache || true
 
       # ============================================================
-      # 9. Enable zram
+      # 10. Enable zram
       # ============================================================
       - name: Enable zram
         uses: ./.github/actions/zram
@@ -340,11 +607,9 @@ jobs:
           device_name: /dev/zram0
 
       # ============================================================
-      # 10. Prepare official Termux package builder
+      # 11. Pull official Termux builder
       #
-      # GHCR occasionally resets large layer downloads, so retry.
-      #
-      # If all retries fail, build upstream builder locally.
+      # Retry GHCR. If unavailable, build official builder locally.
       # ============================================================
       - name: Prepare official Termux builder
         shell: bash
@@ -365,11 +630,10 @@ jobs:
               break
             fi
 
-            echo "Docker pull failed."
-
             if [ "$attempt" -lt 5 ]; then
               delay=$((attempt * 15))
 
+              echo "Pull failed."
               echo "Retrying in ${delay}s..."
 
               sleep "$delay"
@@ -379,8 +643,8 @@ jobs:
           if [ "$PULLED" -ne 1 ]; then
             echo
             echo "======================================"
-            echo "GHCR repeatedly failed"
-            echo "Building upstream Termux builder"
+            echo "GHCR unavailable"
+            echo "Building official Termux builder"
             echo "======================================"
 
             docker build \
@@ -390,21 +654,15 @@ jobs:
             docker buildx prune -af || true
           fi
 
-          echo
-          echo "======================================"
-          echo "Official builder"
-          echo "======================================"
-
           docker image inspect \
             "$BASE_IMAGE" \
             --format \
             'ID={{.Id}} Size={{.Size}} Created={{.Created}}'
 
       # ============================================================
-      # 11. Create derived builder containing sccache
+      # 12. Derive builder image with sccache installed
       #
-      # Installing it here avoids sudo inside Termux's restricted
-      # AppArmor environment.
+      # Do this before restricted AppArmor is loaded.
       # ============================================================
       - name: Build Firefox builder with sccache
         shell: bash
@@ -436,7 +694,7 @@ jobs:
 
           echo
           echo "======================================"
-          echo "Derived Firefox builder"
+          echo "Derived builder"
           echo "======================================"
 
           docker image inspect \
@@ -445,20 +703,11 @@ jobs:
             'ID={{.Id}} Size={{.Size}} Created={{.Created}}'
 
       # ============================================================
-      # 12. Create builder container
+      # 13. Create Termux builder container
       #
-      # We cannot put sccache under:
-      #
-      # /home/builder/termux-packages/
-      #
-      # because Termux's restricted AppArmor profile prevents writes
-      # to most of that tree.
-      #
-      # Host:
-      #   $GITHUB_WORKSPACE/.sccache
-      #
-      # Container:
-      #   /home/builder/.cache/sccache
+      # Host compiler cache is mounted outside the repository tree
+      # because Termux's restricted AppArmor prevents writes to most
+      # of /home/builder/termux-packages.
       # ============================================================
       - name: Start Termux builder
         shell: bash
@@ -491,28 +740,9 @@ jobs:
             '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
 
       # ============================================================
-      # 13. Verify sccache binary exists
+      # 14. Verify sccache binary + writable cache
       # ============================================================
       - name: Verify sccache
-        shell: bash
-        run: |
-          set -euxo pipefail
-
-          ./scripts/run-docker.sh bash -lc '
-            set -e
-
-            echo "======================================"
-            echo "sccache"
-            echo "======================================"
-
-            command -v sccache
-            sccache --version
-          '
-
-      # ============================================================
-      # 14. Verify cache is writable before starting a huge build
-      # ============================================================
-      - name: Verify sccache cache access
         shell: bash
         run: |
           set -euxo pipefail
@@ -531,22 +761,22 @@ jobs:
 
             echo
             echo "======================================"
+            echo "sccache"
+            echo "======================================"
+
+            command -v sccache
+            sccache --version
+
+            echo
+            echo "======================================"
             echo "Cache directory"
             echo "======================================"
 
             ls -ld "$SCCACHE_DIR"
 
-            echo
-            echo "======================================"
-            echo "Cache write test"
-            echo "======================================"
-
             touch "$SCCACHE_DIR/.write-test"
-
-            echo "test" > "$SCCACHE_DIR/.write-test"
-
+            echo test > "$SCCACHE_DIR/.write-test"
             cat "$SCCACHE_DIR/.write-test"
-
             rm "$SCCACHE_DIR/.write-test"
 
             echo
@@ -554,8 +784,7 @@ jobs:
           '
 
       # ============================================================
-      # 15. Work around current Termux free-space.sh Ubuntu 26.04
-      #     ruby3.2-doc issue
+      # 15. Work around current ubuntu-26.04 free-space issue
       # ============================================================
       - name: Patch Termux free-space script
         shell: bash
@@ -564,22 +793,13 @@ jobs:
 
           SCRIPT="scripts/free-space.sh"
 
-          echo "======================================"
-          echo "ruby3.2-doc before patch"
-          echo "======================================"
-
           grep -n 'ruby3.2-doc' "$SCRIPT" || true
 
           sed -i \
             '/ruby3\.2-doc/d' \
             "$SCRIPT"
 
-          echo
-          echo "======================================"
-          echo "ruby3.2-doc after patch"
-          echo "======================================"
-
-          if grep -n 'ruby3.2-doc' "$SCRIPT"; then
+          if grep -q 'ruby3.2-doc' "$SCRIPT"; then
             echo "ERROR: ruby3.2-doc still present"
             exit 1
           fi
@@ -587,10 +807,7 @@ jobs:
           echo "ruby3.2-doc removed."
 
       # ============================================================
-      # 16. Free runner disk space
-      #
-      # Docker builder/container have already been created before
-      # this script deletes containerd cached blobs.
+      # 16. Free GitHub runner disk space
       # ============================================================
       - name: Free runner disk space
         shell: bash
@@ -613,7 +830,7 @@ jobs:
           df -h
 
       # ============================================================
-      # 17. Reset compiler-cache statistics
+      # 17. Reset sccache stats
       # ============================================================
       - name: Reset sccache statistics
         shell: bash
@@ -629,8 +846,13 @@ jobs:
       # ============================================================
       # 18. Build Firefox
       #
-      # -f : force Firefox itself
-      # -I : install dependencies from Termux repository
+      # The injected termux_step_pre_configure() first performs:
+      #
+      # - source patch checks
+      # - libandroid-glob presence check
+      # - real Android aarch64 glob/globfree link test
+      #
+      # before Firefox's huge build begins.
       # ============================================================
       - name: Build Firefox
         id: build-firefox
@@ -654,7 +876,7 @@ jobs:
             2>&1 | tee firefox-build.log
 
       # ============================================================
-      # 19. Show cache statistics regardless of build result
+      # 19. Show sccache stats even on failure
       # ============================================================
       - name: Show sccache statistics
         if: always()
@@ -667,7 +889,7 @@ jobs:
             sccache --show-stats || true
 
       # ============================================================
-      # 20. Build diagnostics
+      # 20. Diagnostics
       # ============================================================
       - name: Build diagnostics
         if: always()
@@ -695,7 +917,7 @@ jobs:
 
           echo
           echo "======================================"
-          echo "sccache directory"
+          echo "sccache size"
           echo "======================================"
 
           du -sh .sccache \
@@ -703,59 +925,47 @@ jobs:
 
           echo
           echo "======================================"
-          echo "Generated DEBs"
+          echo "Sandbox/preflight markers"
+          echo "======================================"
+
+          grep -nE \
+            'preflight|security/sandbox|libmozsandbox|libxul|glob|globfree|pthread_atfork|pthread_mutexattr_setprotocol|shm_open|undefined symbol|duplicate symbol|ld\.lld: error' \
+            firefox-build.log \
+            2>/dev/null \
+            | tail -n 200 || true
+
+          echo
+          echo "======================================"
+          echo "Generated DEB files"
           echo "======================================"
 
           find output \
             -type f \
-            -name '*.deb' \
-            -print \
-            2>/dev/null || true
-
-          find termux-packages/output \
-            -type f \
-            -name '*.deb' \
+            -name 'firefox_*.deb' \
             -print \
             2>/dev/null || true
 
           echo
           echo "======================================"
-          echo "Sandbox build markers"
+          echo "Last 400 Firefox build lines"
           echo "======================================"
 
-          grep -nE \
-            'security/sandbox|libmozsandbox|pthread_atfork|ld\.lld: error|undefined symbol|duplicate symbol' \
-            firefox-build.log \
-            2>/dev/null \
-            | tail -n 100 || true
-
-          echo
-          echo "======================================"
-          echo "Last 350 Firefox build lines"
-          echo "======================================"
-
-          tail -n 350 \
+          tail -n 400 \
             firefox-build.log \
             2>/dev/null || true
 
       # ============================================================
-      # 21. Save sccache EVEN WHEN BUILD FAILS
-      #
-      # This is important for iterative sandbox porting.
-      #
-      # A unique run_id key is used so the cache can be written.
-      # The next run restores the newest v5 cache through
-      # restore-keys.
+      # 21. Save sccache regardless of Firefox success/failure
       # ============================================================
       - name: Save Firefox sccache
         if: always()
         uses: actions/cache/save@v4
         with:
           path: .sccache
-          key: firefox-sccache-aarch64-v5-${{ github.run_id }}
+          key: firefox-sccache-aarch64-v6-${{ github.run_id }}
 
       # ============================================================
-      # 22. Collect successful package
+      # 22. Collect successful Firefox package
       # ============================================================
       - name: Collect Firefox package
         if: success()
@@ -765,14 +975,11 @@ jobs:
 
           mkdir -p artifacts
 
-          find \
-            output \
-            termux-packages/output \
+          find output \
             -type f \
             -name 'firefox_*.deb' \
             -print \
-            -exec cp -v '{}' artifacts/ ';' \
-            2>/dev/null || true
+            -exec cp -v '{}' artifacts/ ';'
 
           cp \
             firefox-sandbox-changes.diff \
@@ -811,7 +1018,7 @@ jobs:
           ls -lh artifacts/
 
       # ============================================================
-      # 23. Upload successful Firefox package
+      # 23. Upload successful package
       # ============================================================
       - name: Upload Firefox sandbox package
         if: success()
@@ -824,7 +1031,7 @@ jobs:
           retention-days: 14
 
       # ============================================================
-      # 24. Always keep failure diagnostics
+      # 24. Always preserve diagnostics
       # ============================================================
       - name: Upload build diagnostics
         if: always()
