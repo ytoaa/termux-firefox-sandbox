@@ -1,4 +1,4 @@
-name: Build Termux Firefox Native Sandbox Port v2.1
+name: Build Termux Firefox Native Sandbox Port v2.2
 
 on:
   workflow_dispatch:
@@ -20,9 +20,6 @@ jobs:
     timeout-minutes: 355
 
     steps:
-      # ============================================================
-      # 1. Checkout current upstream Termux packages
-      # ============================================================
       - name: Checkout termux-packages
         uses: actions/checkout@v7
         with:
@@ -30,9 +27,6 @@ jobs:
           ref: master
           fetch-depth: 1
 
-      # ============================================================
-      # 2. Verify upstream Firefox recipe
-      # ============================================================
       - name: Verify upstream Firefox recipe
         shell: bash
         run: |
@@ -62,20 +56,10 @@ jobs:
           echo "======================================"
           echo "Original sandbox configuration"
           echo "======================================"
+          grep -nE 'sandbox|forkserver|ccache|jemalloc|hardening' "$MOZCONFIG" || true
 
-          grep -nE \
-            'sandbox|forkserver|ccache|jemalloc|hardening' \
-            "$MOZCONFIG" || true
+          grep -q '^ac_add_options --disable-sandbox$' "$MOZCONFIG"
 
-          # Upstream가 이미 sandbox 설정을 변경했다면
-          # 조용히 잘못된 patch를 적용하지 말고 즉시 중단.
-          grep -q \
-            '^ac_add_options --disable-sandbox$' \
-            "$MOZCONFIG"
-
-      # ============================================================
-      # 3. Enable Firefox native sandbox
-      # ============================================================
       - name: Configure native sandbox build
         shell: bash
         run: |
@@ -87,59 +71,23 @@ jobs:
             's/^ac_add_options --disable-sandbox$/ac_add_options --enable-sandbox/' \
             "$MOZCONFIG"
 
-          if ! grep -q \
-            '^ac_add_options --disable-forkserver$' \
-            "$MOZCONFIG"; then
+          grep -q '^ac_add_options --disable-forkserver$' "$MOZCONFIG" || \
+            echo 'ac_add_options --disable-forkserver' >> "$MOZCONFIG"
 
-            echo \
-              'ac_add_options --disable-forkserver' \
-              >> "$MOZCONFIG"
-          fi
+          grep -q '^ac_add_options --with-ccache=sccache$' "$MOZCONFIG" || \
+            echo 'ac_add_options --with-ccache=sccache' >> "$MOZCONFIG"
 
-          if ! grep -q \
-            '^ac_add_options --with-ccache=sccache$' \
-            "$MOZCONFIG"; then
+          grep -q '^ac_add_options --enable-sandbox$' "$MOZCONFIG"
+          grep -q '^ac_add_options --disable-forkserver$' "$MOZCONFIG"
+          grep -q '^ac_add_options --with-ccache=sccache$' "$MOZCONFIG"
 
-            echo \
-              'ac_add_options --with-ccache=sccache' \
-              >> "$MOZCONFIG"
-          fi
-
-          grep -q \
-            '^ac_add_options --enable-sandbox$' \
-            "$MOZCONFIG"
-
-          grep -q \
-            '^ac_add_options --disable-forkserver$' \
-            "$MOZCONFIG"
-
-          grep -q \
-            '^ac_add_options --with-ccache=sccache$' \
-            "$MOZCONFIG"
-
-          if grep -q \
-            '^ac_add_options --disable-sandbox$' \
-            "$MOZCONFIG"; then
-
+          if grep -q '^ac_add_options --disable-sandbox$' "$MOZCONFIG"; then
             echo "ERROR: --disable-sandbox is still present"
             exit 1
           fi
 
-          echo "======================================"
-          echo "Modified mozconfig"
-          echo "======================================"
-
           cat "$MOZCONFIG"
 
-      # ============================================================
-      # 4. Patch Firefox package recipe
-      #
-      # Socket/Utility PAC policy는 여기에서 실제 source 구조를
-      # 찾아 삽입한다.
-      #
-      # 이 함수는 모든 *.patch가 적용된 다음 실행되므로
-      # Firefox 버전별 line-number/context 변화에 덜 민감하다.
-      # ============================================================
       - name: Patch Firefox package recipe
         shell: bash
         run: |
@@ -152,105 +100,39 @@ jobs:
           path = Path("x11-packages/firefox/build.sh")
           text = path.read_text()
 
-          # --------------------------------------------------------
-          # Add libandroid-glob dependency.
-          # --------------------------------------------------------
           m = re.search(
               r'^TERMUX_PKG_DEPENDS="([^"]*)"$',
               text,
               flags=re.MULTILINE,
           )
-
           if not m:
-              raise SystemExit(
-                  "TERMUX_PKG_DEPENDS not found"
-              )
+              raise SystemExit("TERMUX_PKG_DEPENDS not found")
 
-          deps = [
-              x.strip()
-              for x in m.group(1).split(",")
-          ]
-
+          deps = [x.strip() for x in m.group(1).split(",")]
           if "libandroid-glob" not in deps:
               try:
-                  pos = (
-                      deps.index("libandroid-shmem")
-                      + 1
-                  )
+                  pos = deps.index("libandroid-shmem") + 1
               except ValueError:
                   pos = len(deps)
+              deps.insert(pos, "libandroid-glob")
+              new_line = 'TERMUX_PKG_DEPENDS="' + ", ".join(deps) + '"'
+              text = text[:m.start()] + new_line + text[m.end():]
 
-              deps.insert(
-                  pos,
-                  "libandroid-glob",
-              )
-
-              new_line = (
-                  'TERMUX_PKG_DEPENDS="'
-                  + ", ".join(deps)
-                  + '"'
-              )
-
-              text = (
-                  text[:m.start()]
-                  + new_line
-                  + text[m.end():]
-              )
-
-          # --------------------------------------------------------
-          # Add libandroid-glob linker dependency.
-          # --------------------------------------------------------
-          old_ldflags = (
-              'LDFLAGS+=" -landroid-shmem '
-              '-landroid-spawn -llog"'
-          )
-
-          new_ldflags = (
-              'LDFLAGS+=" -landroid-shmem '
-              '-landroid-spawn '
-              '-landroid-glob -llog"'
-          )
+          old_ldflags = 'LDFLAGS+=" -landroid-shmem -landroid-spawn -llog"'
+          new_ldflags = 'LDFLAGS+=" -landroid-shmem -landroid-spawn -landroid-glob -llog"'
 
           if new_ldflags not in text:
               if old_ldflags not in text:
-                  raise SystemExit(
-                      "Expected Firefox LDFLAGS "
-                      "line not found"
-                  )
+                  raise SystemExit("Expected Firefox LDFLAGS line not found")
+              text = text.replace(old_ldflags, new_ldflags, 1)
 
-              text = text.replace(
-                  old_ldflags,
-                  new_ldflags,
-                  1,
-              )
-
-          # --------------------------------------------------------
-          # Insert preflight at start of termux_step_pre_configure.
-          #
-          # build-package flow:
-          #
-          # source
-          #   ↓
-          # normal Termux patches
-          #   ↓
-          # 9999 sandbox patch
-          #   ↓
-          # termux_step_pre_configure  ← 여기
-          # --------------------------------------------------------
-          marker = (
-              "termux_step_pre_configure() {\n"
-              "\ttermux_setup_nodejs\n"
-          )
-
+          marker = "termux_step_pre_configure() {\n\ttermux_setup_nodejs\n"
           if marker not in text:
-              raise SystemExit(
-                  "termux_step_pre_configure "
-                  "marker not found"
-              )
+              raise SystemExit("termux_step_pre_configure marker not found")
 
           preflight = r'''termux_step_pre_configure() {
           \techo "======================================"
-          \techo "Firefox native sandbox Termux/Bionic preflight v2.1"
+          \techo "Firefox native sandbox Termux/Bionic preflight v2.2"
           \techo "======================================"
 
           \tlocal _macro_src
@@ -275,55 +157,24 @@ jobs:
           }
           EOF
 
-          \t"$CC" \
-          \t\t-c \
-          \t\t"$_macro_src" \
-          \t\t-o "$_macro_obj"
+          \t"$CC" -c "$_macro_src" -o "$_macro_obj"
 
           \techo
           \techo "Target macro probe: SUCCESS"
 
-          # ========================================================
-          # Socket / Utility PAC policy injection
-          #
-          # Common PrctlPolicy()의 PAC 허용은 Socket/Utility의
-          # 자체 PrctlPolicy override에는 도달하지 않는다.
-          #
-          # 따라서 실제 source 구조를 찾아 두 override에만
-          # 좁은 PAC rule을 추가한다.
-          # ========================================================
           \tpython3 <<'PY2'
           from pathlib import Path
 
-          path = Path(
-              "security/sandbox/linux/"
-              "SandboxFilter.cpp"
-          )
-
+          path = Path("security/sandbox/linux/SandboxFilter.cpp")
           text = path.read_text()
 
-
-          def class_bounds(
-              source,
-              class_name,
-              next_class=None,
-          ):
-              start = source.find(
-                  f"class {class_name}"
-              )
-
+          def class_bounds(source, class_name, next_class=None):
+              start = source.find(f"class {class_name}")
               if start < 0:
-                  raise SystemExit(
-                      f"{class_name}: "
-                      "class not found"
-                  )
+                  raise SystemExit(f"{class_name}: class not found")
 
               if next_class:
-                  end = source.find(
-                      f"class {next_class}",
-                      start + 1,
-                  )
-
+                  end = source.find(f"class {next_class}", start + 1)
                   if end < 0:
                       end = len(source)
               else:
@@ -331,103 +182,52 @@ jobs:
 
               return start, end
 
+          def prctl_bounds(source, class_name, next_class=None):
+              start, end = class_bounds(source, class_name, next_class)
+              segment = source[start:end]
 
-          def inject_prctl_rules(
-              class_name,
-              next_class=None,
-          ):
+              marker = "ResultExpr PrctlPolicy() const override {"
+              p = segment.find(marker)
+              if p < 0:
+                  raise SystemExit(f"{class_name}: PrctlPolicy not found")
+
+              q = segment.find("ResultExpr EvaluateSyscall", p)
+              if q < 0:
+                  raise SystemExit(
+                      f"{class_name}: EvaluateSyscall boundary not found"
+                  )
+
+              return start, end, p, q, segment[p:q]
+
+          def inject_prctl_rules(class_name, next_class=None):
               global text
 
-              start, end = class_bounds(
-                  text,
-                  class_name,
-                  next_class,
+              start, end, p, q, prctl = prctl_bounds(
+                  text, class_name, next_class
               )
 
-              segment = text[start:end]
+              need_dumpable = "PR_GET_DUMPABLE" not in prctl
+              need_pac = "PR_PAC_RESET_KEYS" not in prctl
 
-              prctl_marker = (
-                  "ResultExpr PrctlPolicy() "
-                  "const override {"
-              )
-
-              prctl_start = segment.find(
-                  prctl_marker
-              )
-
-              if prctl_start < 0:
-                  raise SystemExit(
-                      f"{class_name}: "
-                      "PrctlPolicy not found"
-                  )
-
-              # PrctlPolicy 범위만 검사.
-              prctl_end = segment.find(
-                  "ResultExpr EvaluateSyscall",
-                  prctl_start,
-              )
-
-              if prctl_end < 0:
-                  raise SystemExit(
-                      f"{class_name}: "
-                      "EvaluateSyscall boundary "
-                      "not found"
-                  )
-
-              prctl = segment[
-                  prctl_start:prctl_end
-              ]
-
-              need_dumpable = (
-                  "PR_GET_DUMPABLE"
-                  not in prctl
-              )
-
-              need_pac = (
-                  "PR_PAC_RESET_KEYS"
-                  not in prctl
-              )
-
-              if (
-                  not need_dumpable
-                  and not need_pac
-              ):
-                  print(
-                      f"{class_name}: "
-                      "Termux PAC rules "
-                      "already present"
-                  )
+              if not need_dumpable and not need_pac:
+                  print(f"{class_name}: Termux PAC rules already present")
                   return
 
-              switch_pos = segment.find(
-                  "return Switch(op)",
-                  prctl_start,
-                  prctl_end,
-              )
+              segment = text[start:end]
+              switch_pos = segment.find("return Switch(op)", p, q)
 
               if switch_pos < 0:
                   raise SystemExit(
-                      f"{class_name}: "
-                      "return Switch(op) "
-                      "not found"
+                      f"{class_name}: return Switch(op) not found"
                   )
 
-              newline = segment.find(
-                  "\n",
-                  switch_pos,
-              )
-
+              newline = segment.find("\n", switch_pos)
               if newline < 0:
                   raise SystemExit(
-                      f"{class_name}: "
-                      "malformed Switch(op)"
+                      f"{class_name}: malformed Switch(op)"
                   )
 
-              insert_at = (
-                  start
-                  + newline
-                  + 1
-              )
+              insert_at = start + newline + 1
 
               rules = [
                   "#if defined(__TERMUX__)\n"
@@ -435,45 +235,29 @@ jobs:
 
               if need_dumpable:
                   rules.append(
-                      "        .CASES("
-                      "(PR_GET_DUMPABLE), "
-                      "Allow())\n"
+                      "        .Case(PR_GET_DUMPABLE, Allow())\n"
                   )
 
               if need_pac:
                   rules.extend([
                       "#  if defined(__aarch64__)\n",
-
-                      "        .CASES("
-                      "(PR_PAC_RESET_KEYS),\n",
-
-                      "               If("
-                      "arg2 == PR_PAC_APIAKEY, "
-                      "Allow())\n",
-
-                      "                   .Else("
-                      "InvalidSyscall()))\n",
-
+                      "        .Case(PR_PAC_RESET_KEYS,\n",
+                      "              If(arg2 == PR_PAC_APIAKEY, Allow())\n",
+                      "                  .Else(InvalidSyscall()))\n",
                       "#  endif\n",
                   ])
 
-              rules.append(
-                  "#endif\n"
-              )
-
-              insertion = "".join(rules)
+              rules.append("#endif\n")
 
               text = (
                   text[:insert_at]
-                  + insertion
+                  + "".join(rules)
                   + text[insert_at:]
               )
 
               print(
-                  f"{class_name}: "
-                  "Termux PAC rules injected"
+                  f"{class_name}: Termux PAC rules injected"
               )
-
 
           inject_prctl_rules(
               "SocketProcessSandboxPolicy",
@@ -486,59 +270,44 @@ jobs:
 
           path.write_text(text)
 
-          # --------------------------------------------------------
-          # Verify rules are really inside each PrctlPolicy().
-          # --------------------------------------------------------
           result = path.read_text()
 
-
-          def verify_prctl(
-              class_name,
-              next_class=None,
-          ):
-              start, end = class_bounds(
+          def verify_prctl(class_name, next_class=None):
+              _, _, _, _, prctl = prctl_bounds(
                   result,
                   class_name,
                   next_class,
               )
 
-              segment = result[start:end]
-
-              p = segment.find(
-                  "ResultExpr PrctlPolicy() "
-                  "const override {"
+              bad_patterns = (
+                  ".CASES((" + "PR_GET_DUMPABLE)",
+                  ".CASES((" + "PR_PAC_RESET_KEYS)",
               )
 
-              q = segment.find(
-                  "ResultExpr EvaluateSyscall",
-                  p,
+              for bad in bad_patterns:
+                  if bad in prctl:
+                      raise SystemExit(
+                          f"{class_name}: "
+                          f"invalid injected API found: {bad}"
+                      )
+
+              required = (
+                  ".Case(PR_GET_DUMPABLE, Allow())",
+                  ".Case(PR_PAC_RESET_KEYS,",
+                  "arg2 == PR_PAC_APIAKEY",
               )
 
-              if p < 0 or q < 0:
-                  raise SystemExit(
-                      f"{class_name}: "
-                      "verification boundaries "
-                      "missing"
-                  )
-
-              prctl = segment[p:q]
-
-              for token in (
-                  "PR_GET_DUMPABLE",
-                  "PR_PAC_RESET_KEYS",
-                  "PR_PAC_APIAKEY",
-              ):
+              for token in required:
                   if token not in prctl:
                       raise SystemExit(
                           f"{class_name}: "
-                          f"{token} missing"
+                          f"expected rule missing: {token}"
                       )
 
               print(
                   f"{class_name}: "
-                  "PAC verification SUCCESS"
+                  "PrctlPolicy syntax sanity SUCCESS"
               )
-
 
           verify_prctl(
               "SocketProcessSandboxPolicy",
@@ -550,94 +319,57 @@ jobs:
           )
 
           print(
-              "Socket/Utility PrctlPolicy "
-              "injection: SUCCESS"
+              "Socket/Utility PrctlPolicy injection: SUCCESS"
           )
           PY2
 
-          # ========================================================
-          # Existing compatibility verification
-          # ========================================================
-          \tgrep -Fq \
-          \t\t'#include <time.h>' \
+          \tgrep -Fq '#include <time.h>' \
           \t\tsecurity/sandbox/linux/reporter/SandboxReporterCommon.h
 
-          \tgrep -Fq \
-          \t\t'BUILDFLAG(IS_FUCHSIA) || defined(__TERMUX__)' \
+          \tgrep -Fq 'BUILDFLAG(IS_FUCHSIA) || defined(__TERMUX__)' \
           \t\tsecurity/sandbox/chromium/base/synchronization/lock_impl_posix.cc
 
-          \tgrep -Fq \
-          \t\t'RunGlibcLazyInitializers' \
+          \tgrep -Fq 'RunGlibcLazyInitializers' \
           \t\tsecurity/sandbox/linux/Sandbox.cpp
 
-          \tgrep -Fq \
-          \t\t"$TERMUX_PREFIX/lib" \
+          \tgrep -Fq "$TERMUX_PREFIX/lib" \
           \t\tsecurity/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
 
-          \tgrep -Fq \
-          \t\t"$TERMUX_PREFIX/etc" \
+          \tgrep -Fq "$TERMUX_PREFIX/etc" \
           \t\tsecurity/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
 
-          \tgrep -Fq \
-          \t\t"$TERMUX_PREFIX/share" \
+          \tgrep -Fq "$TERMUX_PREFIX/share" \
           \t\tsecurity/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
 
-          \tgrep -Fq \
-          \t\t'#if !defined(ANDROID) || defined(__TERMUX__)' \
+          \tgrep -Fq '#if !defined(ANDROID) || defined(__TERMUX__)' \
           \t\tsecurity/sandbox/linux/SandboxFilter.cpp
 
-          \tgrep -Fq \
-          \t\t'PR_PAC_RESET_KEYS' \
+          \tgrep -Fq '#if defined(ANDROID) && !defined(__TERMUX__)' \
           \t\tsecurity/sandbox/linux/SandboxFilter.cpp
 
-          \tgrep -Fq \
-          \t\t'PR_GET_DUMPABLE' \
+          \tgrep -Fq 'PR_PAC_RESET_KEYS' \
           \t\tsecurity/sandbox/linux/SandboxFilter.cpp
 
-          \tgrep -Fq \
-          \t\t'MREMAP_MAYMOVE | MREMAP_FIXED' \
+          \tgrep -Fq 'PR_GET_DUMPABLE' \
           \t\tsecurity/sandbox/linux/SandboxFilter.cpp
 
-          \tgrep -Fq \
-          \t\t'#if defined(ANDROID) && !defined(__TERMUX__)' \
+          \tgrep -Fq 'MREMAP_MAYMOVE | MREMAP_FIXED' \
           \t\tsecurity/sandbox/linux/SandboxFilter.cpp
 
-          # ========================================================
-          # Shared-memory path verification
-          #
-          # Official Termux Firefox 0009 patch:
-          #
-          # shm_open("/org.mozilla.ipc...")
-          #     ↓
-          # $TERMUX_PREFIX/tmp/org.mozilla.ipc...
-          #
-          # Broker도 반드시 같은 physical path를 허용해야 한다.
-          # ========================================================
-          \tgrep -Fq \
-          \t\t"$TERMUX_PREFIX/tmp/" \
+          \tgrep -Fq "$TERMUX_PREFIX/tmp/" \
           \t\tipc/glue/SharedMemoryPlatform_posix.cpp
 
-          \tgrep -Fq \
-          \t\t"std::string shmPath(\"$TERMUX_PREFIX/tmp\")" \
+          \tgrep -Fq "std::string shmPath(\"$TERMUX_PREFIX/tmp\")" \
           \t\tsecurity/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
 
-          # Android system fonts read-only.
-          \tgrep -Fq \
-          \t\t'policy->AddTree(rdonly, "/system/fonts")' \
+          \tgrep -Fq 'policy->AddTree(rdonly, "/system/fonts")' \
           \t\tsecurity/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
 
           \techo
           \techo "Sandbox source verification: SUCCESS"
 
-          # ========================================================
-          # libandroid-glob
-          # ========================================================
-          \tif [[ \
-          \t\t! -e "$TERMUX_PREFIX/lib/libandroid-glob.so" \
-          \t\t&& \
-          \t\t! -e "$TERMUX_PREFIX/lib/libandroid-glob.a" \
-          \t]]; then
-
+          \tif [[ ! -e "$TERMUX_PREFIX/lib/libandroid-glob.so" && \
+          \t      ! -e "$TERMUX_PREFIX/lib/libandroid-glob.a" ]]; then
           \t\techo "ERROR: libandroid-glob is not installed"
           \t\texit 1
           \tfi
@@ -682,8 +414,7 @@ jobs:
           \techo
           \techo "API24 glob/globfree target link test: SUCCESS"
 
-          \t"$READELF" \
-          \t\t-d "$_glob_so" || true
+          \t"$READELF" -d "$_glob_so" || true
 
           \techo
           \techo "======================================"
@@ -700,12 +431,11 @@ jobs:
           \t\t| head -n 300 || true
 
           \techo
-          \techo "Firefox native sandbox preflight v2.1: SUCCESS"
+          \techo "Firefox native sandbox preflight v2.2: SUCCESS"
 
           \ttermux_setup_nodejs
           '''
 
-          # raw string 안의 \t marker만 실제 tab으로 변경.
           preflight = preflight.replace(
               r"\t",
               "\t",
@@ -717,9 +447,6 @@ jobs:
               1,
           )
 
-          # --------------------------------------------------------
-          # Package revision +1
-          # --------------------------------------------------------
           revision = re.search(
               r"^TERMUX_PKG_REVISION=(\d+)\s*$",
               text,
@@ -763,16 +490,13 @@ jobs:
           echo "Modified build.sh"
           echo "======================================"
 
-          grep \
-            '^TERMUX_PKG_VERSION=' \
+          grep '^TERMUX_PKG_VERSION=' \
             x11-packages/firefox/build.sh
 
-          grep \
-            '^TERMUX_PKG_REVISION=' \
+          grep '^TERMUX_PKG_REVISION=' \
             x11-packages/firefox/build.sh
 
-          grep \
-            '^TERMUX_PKG_DEPENDS=' \
+          grep '^TERMUX_PKG_DEPENDS=' \
             x11-packages/firefox/build.sh
 
           grep -n \
@@ -780,20 +504,14 @@ jobs:
             x11-packages/firefox/build.sh
 
           grep -n \
-            'native sandbox Termux/Bionic preflight v2.1' \
+            'preflight v2.2' \
             x11-packages/firefox/build.sh
 
           grep -n \
-            'Socket/Utility PrctlPolicy' \
+            'Socket/Utility PrctlPolicy injection' \
             x11-packages/firefox/build.sh
 
-      # ============================================================
-      # 5. Add native sandbox patch
-      #
-      # Socket / Utility PrctlPolicy hunks는 의도적으로 없음.
-      # Step 4에서 실제 source 구조를 찾아 삽입한다.
-      # ============================================================
-      - name: Add Termux native sandbox port patch v2.1
+      - name: Add Termux native sandbox port patch v2.2
         shell: bash
         run: |
           set -euxo pipefail
@@ -968,14 +686,11 @@ jobs:
           git add -N "$PATCH"
 
           echo "======================================"
-          echo "Native sandbox port patch v2.1"
+          echo "Native sandbox port patch v2.2"
           echo "======================================"
 
           cat "$PATCH"
 
-      # ============================================================
-      # 6. Recipe-level preflight
-      # ============================================================
       - name: Recipe preflight
         shell: bash
         run: |
@@ -985,23 +700,12 @@ jobs:
           MOZCONFIG="x11-packages/firefox/mozconfig.cfg"
           PATCH="x11-packages/firefox/9999-termux-native-sandbox.patch"
 
-          grep -q \
-            '^ac_add_options --enable-sandbox$' \
-            "$MOZCONFIG"
+          grep -q '^ac_add_options --enable-sandbox$' "$MOZCONFIG"
+          grep -q '^ac_add_options --disable-forkserver$' "$MOZCONFIG"
+          grep -q '^ac_add_options --with-ccache=sccache$' "$MOZCONFIG"
 
-          grep -q \
-            '^ac_add_options --disable-forkserver$' \
-            "$MOZCONFIG"
-
-          grep -q \
-            '^ac_add_options --with-ccache=sccache$' \
-            "$MOZCONFIG"
-
-          grep \
-            '^TERMUX_PKG_DEPENDS=' \
-            "$BUILD_SH" \
-            | grep -q \
-              'libandroid-glob'
+          grep '^TERMUX_PKG_DEPENDS=' "$BUILD_SH" \
+            | grep -q 'libandroid-glob'
 
           grep -q \
             -- '-landroid-glob' \
@@ -1027,7 +731,6 @@ jobs:
             '/system/fonts' \
             "$PATCH"
 
-          # Common PrctlPolicy PAC rule.
           grep -q \
             'PR_PAC_RESET_KEYS' \
             "$PATCH"
@@ -1048,7 +751,37 @@ jobs:
             '#if defined(ANDROID) && !defined(__TERMUX__)' \
             "$PATCH"
 
-          # Socket / Utility injection code.
+          # v2.2 injector itself must contain the valid API.
+          grep -Fq \
+            '.Case(PR_GET_DUMPABLE, Allow())' \
+            "$BUILD_SH"
+
+          grep -Fq \
+            '.Case(PR_PAC_RESET_KEYS,' \
+            "$BUILD_SH"
+
+          # Catch the exact v2.1 regression before downloading/building
+          # Firefox for hours.
+          if grep -Fq \
+            '.CASES((PR_GET_DUMPABLE)' \
+            "$BUILD_SH"; then
+
+            echo \
+              "ERROR: stale invalid .CASES(PR_GET_DUMPABLE) injector found"
+
+            exit 1
+          fi
+
+          if grep -Fq \
+            '.CASES((PR_PAC_RESET_KEYS)' \
+            "$BUILD_SH"; then
+
+            echo \
+              "ERROR: stale invalid .CASES(PR_PAC_RESET_KEYS) injector found"
+
+            exit 1
+          fi
+
           grep -q \
             'SocketProcessSandboxPolicy' \
             "$BUILD_SH"
@@ -1058,11 +791,9 @@ jobs:
             "$BUILD_SH"
 
           grep -q \
-            'Socket/Utility PrctlPolicy' \
+            'PrctlPolicy syntax sanity SUCCESS' \
             "$BUILD_SH"
 
-          # Generated .patch itself is excluded:
-          # unified diff blank context line starts with one space.
           git diff --check -- \
             x11-packages/firefox/build.sh \
             x11-packages/firefox/mozconfig.cfg
@@ -1070,9 +801,6 @@ jobs:
           echo
           echo "Recipe preflight: SUCCESS"
 
-      # ============================================================
-      # 7. Runtime test helper
-      # ============================================================
       - name: Create runtime test helper
         shell: bash
         run: |
@@ -1084,20 +812,8 @@ jobs:
           set -u
 
           LEVEL="${FIREFOX_SANDBOX_LEVEL:-3}"
-
-          PROFILE="${
-            FIREFOX_SANDBOX_PROFILE:-
-            $HOME/.mozilla/firefox-termux-sandbox-bringup
-          }"
-
-          # Remove possible line breaks introduced above.
-          PROFILE="${PROFILE//$'\n'/}"
-          PROFILE="${PROFILE// /}"
-
+          PROFILE="${FIREFOX_SANDBOX_PROFILE:-$HOME/.mozilla/firefox-termux-sandbox-bringup}"
           LOG="${FIREFOX_SANDBOX_LOG:-$HOME/firefox-native-sandbox-runtime.log}"
-
-          # 0 = full sandbox stack
-          # 1 = content-only diagnostic comparison
           DISABLE_AUX="${FIREFOX_SANDBOX_DISABLE_AUX:-0}"
 
           mkdir -p "$PROFILE"
@@ -1109,7 +825,7 @@ jobs:
           EOF
 
           echo "======================================"
-          echo "Termux Firefox native sandbox v2.1"
+          echo "Termux Firefox native sandbox v2.2"
           echo "======================================"
           echo "level   : $LEVEL"
           echo "profile : $PROFILE"
@@ -1186,9 +902,15 @@ jobs:
           chmod +x \
             termux-firefox-native-sandbox-test.sh
 
-      # ============================================================
-      # 8. Save recipe diff
-      # ============================================================
+          bash -n \
+            termux-firefox-native-sandbox-test.sh
+
+          grep -Fq \
+            'PROFILE="${FIREFOX_SANDBOX_PROFILE:-$HOME/.mozilla/firefox-termux-sandbox-bringup}"' \
+            termux-firefox-native-sandbox-test.sh
+
+          echo "Runtime helper syntax: SUCCESS"
+
       - name: Save custom changes
         shell: bash
         run: |
@@ -1202,23 +924,18 @@ jobs:
           git status --short \
             x11-packages/firefox/
 
-      # ============================================================
-      # 9. Restore compiler cache
-      # ============================================================
       - name: Restore Firefox sccache
         id: sccache-restore
         uses: actions/cache/restore@v4
         with:
           path: .sccache
-          key: firefox-native-sandbox-sccache-aarch64-v9-${{ github.run_id }}
+          key: firefox-native-sandbox-sccache-aarch64-v10-${{ github.run_id }}
           restore-keys: |
+            firefox-native-sandbox-sccache-aarch64-v10-
             firefox-native-sandbox-sccache-aarch64-v9-
             firefox-native-sandbox-sccache-aarch64-v8-
             firefox-native-sandbox-sccache-aarch64-v7-
 
-      # ============================================================
-      # 10. Prepare host cache
-      # ============================================================
       - name: Prepare sccache directory
         shell: bash
         run: |
@@ -1239,9 +956,6 @@ jobs:
           du -sh \
             .sccache || true
 
-      # ============================================================
-      # 11. zram
-      # ============================================================
       - name: Enable zram
         uses: ./.github/actions/zram
         with:
@@ -1250,9 +964,6 @@ jobs:
           priority: 100
           device_name: /dev/zram0
 
-      # ============================================================
-      # 12. Prepare official Termux builder
-      # ============================================================
       - name: Prepare official Termux builder
         shell: bash
         run: |
@@ -1264,9 +975,7 @@ jobs:
           for attempt in 1 2 3 4 5; do
 
             echo
-            echo "======================================"
             echo "Base image pull ${attempt}/5"
-            echo "======================================"
 
             if docker pull "$BASE_IMAGE"; then
               PULLED=1
@@ -1285,11 +994,6 @@ jobs:
 
           if [ "$PULLED" -ne 1 ]; then
 
-            echo
-            echo "======================================"
-            echo "Building official builder locally"
-            echo "======================================"
-
             docker build \
               -t "$BASE_IMAGE" \
               scripts/
@@ -1303,9 +1007,6 @@ jobs:
             --format \
             'ID={{.Id}} Size={{.Size}} Created={{.Created}}'
 
-      # ============================================================
-      # 13. Builder + sccache
-      # ============================================================
       - name: Build Firefox builder with sccache
         shell: bash
         run: |
@@ -1339,9 +1040,6 @@ jobs:
             --format \
             'ID={{.Id}} Size={{.Size}} Created={{.Created}}'
 
-      # ============================================================
-      # 14. Start builder
-      # ============================================================
       - name: Start Termux builder
         shell: bash
         run: |
@@ -1363,9 +1061,6 @@ jobs:
             --format \
             '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
 
-      # ============================================================
-      # 15. Verify sccache
-      # ============================================================
       - name: Verify sccache
         shell: bash
         run: |
@@ -1385,8 +1080,6 @@ jobs:
 
               ls -ld "$SCCACHE_DIR"
 
-              touch "$SCCACHE_DIR/.write-test"
-
               echo test \
                 > "$SCCACHE_DIR/.write-test"
 
@@ -1397,9 +1090,6 @@ jobs:
                 "$SCCACHE_DIR/.write-test"
             '
 
-      # ============================================================
-      # 16. ubuntu-26.04 free-space workaround
-      # ============================================================
       - name: Patch Termux free-space script
         shell: bash
         run: |
@@ -1421,9 +1111,6 @@ jobs:
             exit 1
           fi
 
-      # ============================================================
-      # 17. Free disk
-      # ============================================================
       - name: Free runner disk space
         shell: bash
         run: |
@@ -1444,9 +1131,6 @@ jobs:
 
           df -h
 
-      # ============================================================
-      # 18. Reset cache stats
-      # ============================================================
       - name: Reset sccache statistics
         shell: bash
         run: |
@@ -1459,9 +1143,6 @@ jobs:
             sccache \
               --zero-stats
 
-      # ============================================================
-      # 19. Build
-      # ============================================================
       - name: Build Firefox
         id: build-firefox
         shell: bash
@@ -1469,7 +1150,7 @@ jobs:
           set -o pipefail
 
           echo "======================================"
-          echo "Starting Firefox native sandbox v2.1"
+          echo "Starting Firefox native sandbox v2.2"
           echo "======================================"
 
           ./scripts/run-docker.sh \
@@ -1484,9 +1165,6 @@ jobs:
             2>&1 \
             | tee firefox-build.log
 
-      # ============================================================
-      # 20. Cache stats
-      # ============================================================
       - name: Show sccache statistics
         if: always()
         shell: bash
@@ -1499,9 +1177,6 @@ jobs:
               --show-stats \
             || true
 
-      # ============================================================
-      # 21. Diagnostics
-      # ============================================================
       - name: Build diagnostics
         if: always()
         shell: bash
@@ -1536,22 +1211,11 @@ jobs:
 
           echo
           echo "======================================"
-          echo "Disk"
+          echo "Disk / Docker / cache"
           echo "======================================"
 
           df -h || true
-
-          echo
-          echo "======================================"
-          echo "Docker"
-          echo "======================================"
-
           docker ps -a || true
-
-          echo
-          echo "======================================"
-          echo "sccache size"
-          echo "======================================"
 
           du -sh \
             .sccache \
@@ -1563,10 +1227,10 @@ jobs:
           echo "======================================"
 
           grep -nEi \
-            'preflight|SocketProcessSandboxPolicy|UtilitySandboxPolicy|PrctlPolicy injection|security/sandbox|libmozsandbox|libxul|PR_PAC_RESET_KEYS|PR_GET_DUMPABLE|mremap|MREMAP_FIXED|getrlimit|AddSharedMemoryPaths|org\.mozilla\.ipc|system/fonts|shm_open|ShmSegmentsWriter|timezone_prop|undefined symbol|duplicate symbol|ld\.lld: error|patch.*FAILED|Hunk.*FAILED|reject' \
+            'preflight|syntax sanity|SocketProcessSandboxPolicy|UtilitySandboxPolicy|PrctlPolicy injection|security/sandbox|libmozsandbox|libxul|PR_PAC_RESET_KEYS|PR_GET_DUMPABLE|mremap|MREMAP_FIXED|getrlimit|AddSharedMemoryPaths|org\.mozilla\.ipc|system/fonts|shm_open|ShmSegmentsWriter|timezone_prop|undefined symbol|duplicate symbol|ld\.lld: error|patch.*FAILED|Hunk.*FAILED|reject' \
             firefox-build.log \
             2>/dev/null \
-            | tail -n 500 || true
+            | tail -n 600 || true
 
           echo
           echo "======================================"
@@ -1588,19 +1252,13 @@ jobs:
             firefox-build.log \
             2>/dev/null || true
 
-      # ============================================================
-      # 22. Save cache
-      # ============================================================
       - name: Save Firefox sccache
         if: always()
         uses: actions/cache/save@v4
         with:
           path: .sccache
-          key: firefox-native-sandbox-sccache-aarch64-v9-${{ github.run_id }}
+          key: firefox-native-sandbox-sccache-aarch64-v10-${{ github.run_id }}
 
-      # ============================================================
-      # 23. Collect package
-      # ============================================================
       - name: Collect Firefox package
         if: success()
         shell: bash
@@ -1648,33 +1306,23 @@ jobs:
               > SHA256SUMS
           )
 
-          echo "======================================"
-          echo "Final artifacts"
-          echo "======================================"
-
           ls -lh artifacts/
 
-      # ============================================================
-      # 24. Upload successful build
-      # ============================================================
       - name: Upload Firefox native sandbox package
         if: success()
         uses: actions/upload-artifact@v6
         with:
-          name: firefox-native-sandbox-aarch64-v2.1
+          name: firefox-native-sandbox-aarch64-v2.2
           path: artifacts/
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
 
-      # ============================================================
-      # 25. Always preserve diagnostics
-      # ============================================================
       - name: Upload build diagnostics
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: firefox-native-sandbox-build-diagnostics-v2.1
+          name: firefox-native-sandbox-build-diagnostics-v2.2
           path: |
             firefox-build.log
             firefox-native-sandbox-changes.diff
