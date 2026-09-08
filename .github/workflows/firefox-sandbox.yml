@@ -1282,6 +1282,18 @@ jobs:
       # This validates the generator source.
       # Final generated C++ is validated inside pre_configure.
       # ============================================================
+      # ============================================================
+      # 6. Recipe-level preflight v2.3.2
+      #
+      # Validate:
+      #   1. static recipe/patch configuration
+      #   2. generated build.sh shell syntax
+      #   3. embedded PY2 injector Python syntax via AST
+      #   4. exact injector functions, independent of indentation
+      #
+      # Final generated SandboxFilter.cpp is still validated later
+      # inside termux_step_pre_configure().
+      # ============================================================
       - name: Recipe preflight
         shell: bash
         run: |
@@ -1307,7 +1319,7 @@ jobs:
             "$MOZCONFIG"
 
           # --------------------------------------------------------
-          # dependencies
+          # package dependencies / linker flags
           # --------------------------------------------------------
           grep \
             '^TERMUX_PKG_DEPENDS=' \
@@ -1320,7 +1332,7 @@ jobs:
             "$BUILD_SH"
 
           # --------------------------------------------------------
-          # static patch
+          # static native-sandbox patch
           # --------------------------------------------------------
           grep -q \
             'SandboxReporterCommon.h' \
@@ -1363,170 +1375,335 @@ jobs:
             "$PATCH"
 
           # --------------------------------------------------------
-          # Dynamic injector source validation
+          # Generated build.sh must itself be valid shell syntax.
+          # This also validates all heredoc boundaries.
+          # --------------------------------------------------------
+          bash -n "$BUILD_SH"
+
+          echo \
+            "Generated build.sh shell syntax: SUCCESS"
+
+          # --------------------------------------------------------
+          # Extract and AST-parse the embedded PY2 injector.
           #
-          # Do not search for final generated C++ as one literal
-          # string here: Python adjacent string literals are joined
-          # only when the injector runs.
+          # IMPORTANT:
+          # No fixed indentation or exact blank-line layout is used.
           # --------------------------------------------------------
           python3 - "$BUILD_SH" <<'PY'
           from pathlib import Path
+          import ast
+          import re
           import sys
+          import textwrap
 
           path = Path(sys.argv[1])
           text = path.read_text()
 
-          required = [
-              # PAC injector
-              "SocketProcessSandboxPolicy",
-              "UtilitySandboxPolicy",
-              "def inject_prctl_rules(",
-              ".Case(PR_GET_DUMPABLE, ",
-              ".Case(PR_PAC_RESET_KEYS,",
-              "If(arg2 == PR_PAC_APIAKEY, ",
-              ".Else(InvalidSyscall()))",
+          pattern = re.compile(
+              r"(?ms)"
+              r"^[ \t]*python3 <<'PY2'[ \t]*\n"
+              r"(.*?)"
+              r"^[ \t]*PY2[ \t]*$"
+          )
 
-              # PAC final-result verifier
-              "def verify_prctl(",
-              "PR_GET_DUMPABLE",
-              "PR_PAC_RESET_KEYS",
-              "PR_PAC_APIAKEY",
+          matches = pattern.findall(text)
 
-              # RLIMIT injector
-              "#include <sys/resource.h>",
-              "RLIMIT_STACK target probe: SUCCESS",
-              "def inject_common_getrlimit_stack():",
-              "case __NR_getrlimit:",
-              "Arg<int> resource(0);",
-              "resource == RLIMIT_STACK",
-              "SandboxPolicyBase::",
-              "EvaluateSyscall(sysno)",
-
-              # RLIMIT final-result verifier
-              "def verify_common_getrlimit():",
-              "broad_allow = (",
-
-              # final build-time marker
-              "Firefox native sandbox preflight v2.3.1: SUCCESS",
-          ]
-
-          missing = [
-              token
-              for token in required
-              if token not in text
-          ]
-
-          if missing:
-              print(
-                  "ERROR: dynamic injector source "
-                  "validation failed"
+          if len(matches) != 1:
+              raise SystemExit(
+                  "ERROR: expected exactly one PY2 injector "
+                  f"heredoc, found {len(matches)}"
               )
 
-              for token in missing:
-                  print(
-                      f"  missing: {token!r}"
+          py2 = textwrap.dedent(
+              matches[0]
+          )
+
+          # --------------------------------------------------------
+          # Actual Python syntax validation.
+          # --------------------------------------------------------
+          try:
+              tree = ast.parse(
+                  py2,
+                  filename="<firefox-sandbox-PY2>",
+                  mode="exec",
+              )
+          except SyntaxError as exc:
+              print(
+                  "ERROR: embedded PY2 injector "
+                  "has invalid Python syntax"
+              )
+              raise
+
+          print(
+              "Embedded PY2 Python syntax: SUCCESS"
+          )
+
+          # --------------------------------------------------------
+          # Locate functions structurally with Python AST.
+          # No whitespace assumptions.
+          # --------------------------------------------------------
+          functions = {
+              node.name: node
+              for node in ast.walk(tree)
+              if isinstance(
+                  node,
+                  (
+                      ast.FunctionDef,
+                      ast.AsyncFunctionDef,
+                  ),
+              )
+          }
+
+          required_functions = (
+              "class_bounds",
+              "prctl_bounds",
+              "inject_prctl_rules",
+              "inject_common_getrlimit_stack",
+              "verify_prctl",
+              "verify_common_getrlimit",
+          )
+
+          for name in required_functions:
+              if name not in functions:
+                  raise SystemExit(
+                      "ERROR: required PY2 function "
+                      f"missing: {name}"
                   )
 
-              raise SystemExit(1)
+          def function_source(name):
+              node = functions[name]
 
-          # --------------------------------------------------------
-          # Isolate PAC rule generator.
-          # --------------------------------------------------------
-          start = text.find(
-              "def inject_prctl_rules("
-          )
-
-          if start < 0:
-              raise SystemExit(
-                  "ERROR: inject_prctl_rules "
-                  "definition not found"
+              source = ast.get_source_segment(
+                  py2,
+                  node,
               )
 
-          end = text.find(
-              "\n\n          inject_prctl_rules(",
-              start,
+              if not source:
+                  raise SystemExit(
+                      "ERROR: could not extract "
+                      f"function source: {name}"
+                  )
+
+              return source
+
+          # --------------------------------------------------------
+          # PAC generator validation
+          # --------------------------------------------------------
+          pac = function_source(
+              "inject_prctl_rules"
           )
 
-          if end < 0:
-              raise SystemExit(
-                  "ERROR: inject_prctl_rules "
-                  "generator boundary not found"
-              )
+          for token in (
+              ".Case(PR_GET_DUMPABLE, ",
+              ".Case(PR_PAC_RESET_KEYS,",
+              "PR_PAC_APIAKEY",
+              "InvalidSyscall()",
+          ):
+              if token not in pac:
+                  raise SystemExit(
+                      "ERROR: PAC injector token "
+                      f"missing: {token!r}"
+                  )
 
-          injector = text[start:end]
-
-          # v2.1 regression must never return.
+          # Exact v2.1 regression.
           for bad in (
               ".CASES((PR_GET_DUMPABLE",
               ".CASES((PR_PAC_RESET_KEYS",
           ):
-              if bad in injector:
+              if bad in pac:
                   raise SystemExit(
-                      "ERROR: stale invalid PAC API "
-                      f"found: {bad}"
+                      "ERROR: invalid stale PAC API "
+                      f"detected: {bad}"
                   )
 
+          print(
+              "PAC injector AST validation: "
+              "SUCCESS"
+          )
+
+          # --------------------------------------------------------
+          # PAC final-source verifier validation
+          # --------------------------------------------------------
+          verify_pac = function_source(
+              "verify_prctl"
+          )
+
           for token in (
-              ".Case(PR_GET_DUMPABLE, ",
-              ".Case(PR_PAC_RESET_KEYS,",
+              "PR_GET_DUMPABLE",
+              "PR_PAC_RESET_KEYS",
+              "PR_PAC_APIAKEY",
+              "expected rule missing",
           ):
-              if token not in injector:
+              if token not in verify_pac:
                   raise SystemExit(
-                      "ERROR: valid PAC generator "
-                      f"token missing: {token}"
+                      "ERROR: verify_prctl token "
+                      f"missing: {token!r}"
                   )
 
-          # --------------------------------------------------------
-          # Isolate RLIMIT_STACK generator.
-          # --------------------------------------------------------
-          start = text.find(
-              "def inject_common_getrlimit_stack():"
+          print(
+              "PAC result verifier validation: "
+              "SUCCESS"
           )
 
-          if start < 0:
-              raise SystemExit(
-                  "ERROR: RLIMIT_STACK injector "
-                  "definition not found"
-              )
-
-          end = text.find(
-              "\n\n          inject_common_getrlimit_stack()",
-              start,
+          # --------------------------------------------------------
+          # RLIMIT_STACK generator validation
+          # --------------------------------------------------------
+          rlimit = function_source(
+              "inject_common_getrlimit_stack"
           )
-
-          if end < 0:
-              raise SystemExit(
-                  "ERROR: RLIMIT_STACK injector "
-                  "boundary not found"
-              )
-
-          rlimit_injector = text[start:end]
 
           for token in (
+              "SandboxPolicyCommon",
+              "ContentSandboxPolicy",
               "case __NR_getrlimit:",
               "Arg<int> resource(0);",
               "resource == RLIMIT_STACK",
               "SandboxPolicyBase::",
               "EvaluateSyscall(sysno)",
           ):
-              if token not in rlimit_injector:
+              if token not in rlimit:
                   raise SystemExit(
-                      "ERROR: RLIMIT_STACK "
-                      f"generator token missing: {token}"
+                      "ERROR: RLIMIT_STACK injector "
+                      f"token missing: {token!r}"
                   )
 
-          # Reject a generator that unconditionally allows getrlimit.
+          # Make sure the generator is conditional rather than
+          # an unconditional getrlimit Allow().
           if (
-              '"case __NR_getrlimit:\\n"'
-              in rlimit_injector
-              and
-              '"        return Allow();\\n"'
-              in rlimit_injector
+              "case __NR_getrlimit:\\n"
+              "        return Allow();"
+              in rlimit
           ):
               raise SystemExit(
                   "ERROR: broad getrlimit "
                   "Allow() generator detected"
               )
+
+          if (
+              "resource == RLIMIT_STACK"
+              not in rlimit
+          ):
+              raise SystemExit(
+                  "ERROR: RLIMIT_STACK argument "
+                  "filter missing"
+              )
+
+          print(
+              "RLIMIT_STACK injector AST "
+              "validation: SUCCESS"
+          )
+
+          # --------------------------------------------------------
+          # RLIMIT final-source verifier validation
+          # --------------------------------------------------------
+          verify_rlimit = function_source(
+              "verify_common_getrlimit"
+          )
+
+          for token in (
+              "case __NR_getrlimit:",
+              "resource == RLIMIT_STACK",
+              "expected exactly one",
+              "broad getrlimit Allow()",
+          ):
+              if token not in verify_rlimit:
+                  raise SystemExit(
+                      "ERROR: RLIMIT_STACK verifier "
+                      f"token missing: {token!r}"
+                  )
+
+          print(
+              "RLIMIT_STACK result verifier "
+              "validation: SUCCESS"
+          )
+
+          # --------------------------------------------------------
+          # Confirm top-level injector calls really exist.
+          # --------------------------------------------------------
+          calls = []
+
+          for node in ast.walk(tree):
+              if not isinstance(
+                  node,
+                  ast.Call,
+              ):
+                  continue
+
+              func = node.func
+
+              if isinstance(
+                  func,
+                  ast.Name,
+              ):
+                  calls.append(
+                      func.id
+                  )
+
+          if (
+              calls.count(
+                  "inject_prctl_rules"
+              )
+              < 2
+          ):
+              raise SystemExit(
+                  "ERROR: expected two "
+                  "inject_prctl_rules() calls"
+              )
+
+          if (
+              calls.count(
+                  "inject_common_getrlimit_stack"
+              )
+              < 1
+          ):
+              raise SystemExit(
+                  "ERROR: "
+                  "inject_common_getrlimit_stack() "
+                  "call missing"
+              )
+
+          if (
+              calls.count(
+                  "verify_prctl"
+              )
+              < 2
+          ):
+              raise SystemExit(
+                  "ERROR: expected two "
+                  "verify_prctl() calls"
+              )
+
+          if (
+              calls.count(
+                  "verify_common_getrlimit"
+              )
+              < 1
+          ):
+              raise SystemExit(
+                  "ERROR: "
+                  "verify_common_getrlimit() "
+                  "call missing"
+              )
+
+          print(
+              "PY2 injector call graph sanity: "
+              "SUCCESS"
+          )
+
+          # --------------------------------------------------------
+          # Global non-function source requirements.
+          # --------------------------------------------------------
+          for token in (
+              "#include <sys/resource.h>",
+              "RLIMIT_STACK target probe: SUCCESS",
+              "SocketProcessSandboxPolicy",
+              "UtilitySandboxPolicy",
+          ):
+              if token not in text:
+                  raise SystemExit(
+                      "ERROR: build.sh compatibility "
+                      f"token missing: {token!r}"
+                  )
 
           print(
               "Dynamic injector source validation: "
@@ -1535,8 +1712,10 @@ jobs:
           PY
 
           # --------------------------------------------------------
-          # Directly modified files only.
-          # Do not include unified diff file itself.
+          # Direct recipe/config diff validation.
+          #
+          # Do not include the generated .patch because valid
+          # unified-diff context lines contain leading spaces.
           # --------------------------------------------------------
           git diff --check -- \
             x11-packages/firefox/build.sh \
