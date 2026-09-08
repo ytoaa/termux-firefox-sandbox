@@ -1,4 +1,4 @@
-name: Build Termux Firefox Native Sandbox Port v2.3
+name: Build Termux Firefox Native Sandbox Port v2.3.1
 
 on:
   workflow_dispatch:
@@ -250,7 +250,7 @@ jobs:
 
           preflight = r'''termux_step_pre_configure() {
           \techo "======================================"
-          \techo "Firefox native sandbox Termux/Bionic preflight v2.3"
+          \techo "Firefox native sandbox Termux/Bionic preflight v2.3.1"
           \techo "======================================"
 
           \tlocal _macro_src
@@ -363,7 +363,7 @@ jobs:
 
 
           # ========================================================
-          # Ensure RLIMIT_STACK declaration is available.
+          # RLIMIT_STACK declaration
           # ========================================================
           if "#include <sys/resource.h>" not in text:
               include_marker = (
@@ -566,9 +566,6 @@ jobs:
           # syscall 163 = getrlimit
           # arg0 3      = RLIMIT_STACK
           #
-          # Bionic uses this for main-thread stack information.
-          #
-          # Do NOT allow arbitrary getrlimit requests here.
           # Only RLIMIT_STACK is permitted.
           # ========================================================
           def inject_common_getrlimit_stack():
@@ -627,9 +624,7 @@ jobs:
                       "not found"
                   )
 
-              # There are broker-related switch(sysno) blocks
-              # earlier in EvaluateSyscall().  The final common
-              # policy switch is the one immediately preceding
+              # The final common switch(sysno) is immediately before
               # the Timekeeping section.
               switch_pos = segment.rfind(
                   "switch (sysno) {",
@@ -776,9 +771,19 @@ jobs:
                   common_start:common_end
               ]
 
-              required = (
+              required_global = (
                   "#include <sys/resource.h>",
+              )
 
+              for token in required_global:
+                  if token not in result:
+                      raise SystemExit(
+                          "Common RLIMIT_STACK: "
+                          "expected global token missing: "
+                          f"{token}"
+                      )
+
+              required_common = (
                   "#if defined(__TERMUX__) "
                   "&& defined(__NR_getrlimit)",
 
@@ -793,11 +798,11 @@ jobs:
                   "EvaluateSyscall(sysno))",
               )
 
-              for token in required:
-                  if token not in result:
+              for token in required_common:
+                  if token not in common:
                       raise SystemExit(
                           "Common RLIMIT_STACK: "
-                          "expected token missing: "
+                          "expected policy token missing: "
                           f"{token}"
                       )
 
@@ -893,7 +898,7 @@ jobs:
           \t\tsecurity/sandbox/linux/SandboxFilter.cpp
 
           # ========================================================
-          # v2.3 RLIMIT_STACK verification
+          # v2.3.1 RLIMIT_STACK verification
           # ========================================================
           \tgrep -Fq \
           \t\t'#include <sys/resource.h>' \
@@ -906,10 +911,6 @@ jobs:
           \tgrep -Fq \
           \t\t'resource == RLIMIT_STACK' \
           \t\tsecurity/sandbox/linux/SandboxFilter.cpp
-
-          \tgrep -Fq \
-          \t\t'Common RLIMIT_STACK injection: SUCCESS' \
-          \t\t<(printf '%s\n' 'Common RLIMIT_STACK injection: SUCCESS')
 
           # ========================================================
           # SHM / fonts
@@ -1000,7 +1001,7 @@ jobs:
           \t\t| head -n 350 || true
 
           \techo
-          \techo "Firefox native sandbox preflight v2.3: SUCCESS"
+          \techo "Firefox native sandbox preflight v2.3.1: SUCCESS"
 
           \ttermux_setup_nodejs
           '''
@@ -1079,22 +1080,23 @@ jobs:
             x11-packages/firefox/build.sh
 
           grep -n \
-            'preflight v2.3' \
+            'preflight v2.3.1' \
             x11-packages/firefox/build.sh
 
           grep -n \
-            'Common RLIMIT_STACK' \
-            x11-packages/firefox/build.sh
+            'RLIMIT_STACK' \
+            x11-packages/firefox/build.sh \
+            | head -n 40
 
       # ============================================================
       # 5. Native sandbox patch
       #
-      # Identical core policy to successful v2.2.
+      # Same core patch as successful v2.2.
       #
-      # getrlimit(RLIMIT_STACK) is intentionally NOT added here.
-      # It is injected in termux_step_pre_configure after patching.
+      # Socket/Utility PAC and Common RLIMIT_STACK are injected later
+      # by termux_step_pre_configure().
       # ============================================================
-      - name: Add Termux native sandbox port patch v2.3
+      - name: Add Termux native sandbox port patch v2.3.1
         shell: bash
         run: |
           set -euxo pipefail
@@ -1269,13 +1271,16 @@ jobs:
           git add -N "$PATCH"
 
           echo "======================================"
-          echo "Native sandbox port patch v2.3"
+          echo "Native sandbox port patch v2.3.1"
           echo "======================================"
 
           cat "$PATCH"
 
       # ============================================================
       # 6. Recipe-level preflight
+      #
+      # This validates the generator source.
+      # Final generated C++ is validated inside pre_configure.
       # ============================================================
       - name: Recipe preflight
         shell: bash
@@ -1286,6 +1291,9 @@ jobs:
           MOZCONFIG="x11-packages/firefox/mozconfig.cfg"
           PATCH="x11-packages/firefox/9999-termux-native-sandbox.patch"
 
+          # --------------------------------------------------------
+          # mozconfig
+          # --------------------------------------------------------
           grep -q \
             '^ac_add_options --enable-sandbox$' \
             "$MOZCONFIG"
@@ -1298,6 +1306,9 @@ jobs:
             '^ac_add_options --with-ccache=sccache$' \
             "$MOZCONFIG"
 
+          # --------------------------------------------------------
+          # dependencies
+          # --------------------------------------------------------
           grep \
             '^TERMUX_PKG_DEPENDS=' \
             "$BUILD_SH" \
@@ -1308,6 +1319,9 @@ jobs:
             -- '-landroid-glob' \
             "$BUILD_SH"
 
+          # --------------------------------------------------------
+          # static patch
+          # --------------------------------------------------------
           grep -q \
             'SandboxReporterCommon.h' \
             "$PATCH"
@@ -1349,71 +1363,181 @@ jobs:
             "$PATCH"
 
           # --------------------------------------------------------
-          # PAC dynamic injector validation
+          # Dynamic injector source validation
+          #
+          # Do not search for final generated C++ as one literal
+          # string here: Python adjacent string literals are joined
+          # only when the injector runs.
           # --------------------------------------------------------
-          grep -Fq \
-            '.Case(PR_GET_DUMPABLE, Allow())' \
-            "$BUILD_SH"
+          python3 - "$BUILD_SH" <<'PY'
+          from pathlib import Path
+          import sys
 
-          grep -Fq \
-            '.Case(PR_PAC_RESET_KEYS,' \
-            "$BUILD_SH"
+          path = Path(sys.argv[1])
+          text = path.read_text()
 
-          if grep -Fq \
-            '.CASES((PR_GET_DUMPABLE)' \
-            "$BUILD_SH"; then
+          required = [
+              # PAC injector
+              "SocketProcessSandboxPolicy",
+              "UtilitySandboxPolicy",
+              "def inject_prctl_rules(",
+              ".Case(PR_GET_DUMPABLE, ",
+              ".Case(PR_PAC_RESET_KEYS,",
+              "If(arg2 == PR_PAC_APIAKEY, ",
+              ".Else(InvalidSyscall()))",
 
-            echo \
-              "ERROR: stale invalid PAC injector"
+              # PAC final-result verifier
+              "def verify_prctl(",
+              "PR_GET_DUMPABLE",
+              "PR_PAC_RESET_KEYS",
+              "PR_PAC_APIAKEY",
 
-            exit 1
-          fi
+              # RLIMIT injector
+              "#include <sys/resource.h>",
+              "RLIMIT_STACK target probe: SUCCESS",
+              "def inject_common_getrlimit_stack():",
+              "case __NR_getrlimit:",
+              "Arg<int> resource(0);",
+              "resource == RLIMIT_STACK",
+              "SandboxPolicyBase::",
+              "EvaluateSyscall(sysno)",
 
-          if grep -Fq \
-            '.CASES((PR_PAC_RESET_KEYS)' \
-            "$BUILD_SH"; then
+              # RLIMIT final-result verifier
+              "def verify_common_getrlimit():",
+              "broad_allow = (",
 
-            echo \
-              "ERROR: stale invalid PAC injector"
+              # final build-time marker
+              "Firefox native sandbox preflight v2.3.1: SUCCESS",
+          ]
 
-            exit 1
-          fi
+          missing = [
+              token
+              for token in required
+              if token not in text
+          ]
+
+          if missing:
+              print(
+                  "ERROR: dynamic injector source "
+                  "validation failed"
+              )
+
+              for token in missing:
+                  print(
+                      f"  missing: {token!r}"
+                  )
+
+              raise SystemExit(1)
 
           # --------------------------------------------------------
-          # v2.3 getrlimit injector validation
+          # Isolate PAC rule generator.
           # --------------------------------------------------------
-          grep -Fq \
-            '#include <sys/resource.h>' \
-            "$BUILD_SH"
+          start = text.find(
+              "def inject_prctl_rules("
+          )
 
-          grep -Fq \
-            'case __NR_getrlimit:' \
-            "$BUILD_SH"
+          if start < 0:
+              raise SystemExit(
+                  "ERROR: inject_prctl_rules "
+                  "definition not found"
+              )
 
-          grep -Fq \
-            'Arg<int> resource(0);' \
-            "$BUILD_SH"
+          end = text.find(
+              "\n\n          inject_prctl_rules(",
+              start,
+          )
 
-          grep -Fq \
-            'resource == RLIMIT_STACK' \
-            "$BUILD_SH"
+          if end < 0:
+              raise SystemExit(
+                  "ERROR: inject_prctl_rules "
+                  "generator boundary not found"
+              )
 
-          grep -Fq \
-            'SandboxPolicyCommon: getrlimit(RLIMIT_STACK) syntax sanity SUCCESS' \
-            "$BUILD_SH"
+          injector = text[start:end]
 
-          # Explicitly reject broad unconditional getrlimit allow
-          # in the dynamic injector text.
-          if grep -Fq \
-            '"case __NR_getrlimit:\n        return Allow();"' \
-            "$BUILD_SH"; then
+          # v2.1 regression must never return.
+          for bad in (
+              ".CASES((PR_GET_DUMPABLE",
+              ".CASES((PR_PAC_RESET_KEYS",
+          ):
+              if bad in injector:
+                  raise SystemExit(
+                      "ERROR: stale invalid PAC API "
+                      f"found: {bad}"
+                  )
 
-            echo \
-              "ERROR: broad getrlimit Allow() detected"
+          for token in (
+              ".Case(PR_GET_DUMPABLE, ",
+              ".Case(PR_PAC_RESET_KEYS,",
+          ):
+              if token not in injector:
+                  raise SystemExit(
+                      "ERROR: valid PAC generator "
+                      f"token missing: {token}"
+                  )
 
-            exit 1
-          fi
+          # --------------------------------------------------------
+          # Isolate RLIMIT_STACK generator.
+          # --------------------------------------------------------
+          start = text.find(
+              "def inject_common_getrlimit_stack():"
+          )
 
+          if start < 0:
+              raise SystemExit(
+                  "ERROR: RLIMIT_STACK injector "
+                  "definition not found"
+              )
+
+          end = text.find(
+              "\n\n          inject_common_getrlimit_stack()",
+              start,
+          )
+
+          if end < 0:
+              raise SystemExit(
+                  "ERROR: RLIMIT_STACK injector "
+                  "boundary not found"
+              )
+
+          rlimit_injector = text[start:end]
+
+          for token in (
+              "case __NR_getrlimit:",
+              "Arg<int> resource(0);",
+              "resource == RLIMIT_STACK",
+              "SandboxPolicyBase::",
+              "EvaluateSyscall(sysno)",
+          ):
+              if token not in rlimit_injector:
+                  raise SystemExit(
+                      "ERROR: RLIMIT_STACK "
+                      f"generator token missing: {token}"
+                  )
+
+          # Reject a generator that unconditionally allows getrlimit.
+          if (
+              '"case __NR_getrlimit:\\n"'
+              in rlimit_injector
+              and
+              '"        return Allow();\\n"'
+              in rlimit_injector
+          ):
+              raise SystemExit(
+                  "ERROR: broad getrlimit "
+                  "Allow() generator detected"
+              )
+
+          print(
+              "Dynamic injector source validation: "
+              "SUCCESS"
+          )
+          PY
+
+          # --------------------------------------------------------
+          # Directly modified files only.
+          # Do not include unified diff file itself.
+          # --------------------------------------------------------
           git diff --check -- \
             x11-packages/firefox/build.sh \
             x11-packages/firefox/mozconfig.cfg
@@ -1448,7 +1572,7 @@ jobs:
           EOF
 
           echo "======================================"
-          echo "Termux Firefox native sandbox v2.3"
+          echo "Termux Firefox native sandbox v2.3.1"
           echo "======================================"
           echo "level   : $LEVEL"
           echo "profile : $PROFILE"
@@ -1559,8 +1683,9 @@ jobs:
         uses: actions/cache/restore@v4
         with:
           path: .sccache
-          key: firefox-native-sandbox-sccache-aarch64-v11-${{ github.run_id }}
+          key: firefox-native-sandbox-sccache-aarch64-v12-${{ github.run_id }}
           restore-keys: |
+            firefox-native-sandbox-sccache-aarch64-v12-
             firefox-native-sandbox-sccache-aarch64-v11-
             firefox-native-sandbox-sccache-aarch64-v10-
             firefox-native-sandbox-sccache-aarch64-v9-
@@ -1813,7 +1938,7 @@ jobs:
           set -o pipefail
 
           echo "======================================"
-          echo "Starting Firefox native sandbox v2.3"
+          echo "Starting Firefox native sandbox v2.3.1"
           echo "======================================"
 
           ./scripts/run-docker.sh \
@@ -1947,7 +2072,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .sccache
-          key: firefox-native-sandbox-sccache-aarch64-v11-${{ github.run_id }}
+          key: firefox-native-sandbox-sccache-aarch64-v12-${{ github.run_id }}
 
       # ============================================================
       # 23. Collect package
@@ -2013,7 +2138,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v6
         with:
-          name: firefox-native-sandbox-aarch64-v2.3
+          name: firefox-native-sandbox-aarch64-v2.3.1
           path: artifacts/
           if-no-files-found: error
           compression-level: 0
@@ -2026,7 +2151,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: firefox-native-sandbox-build-diagnostics-v2.3
+          name: firefox-native-sandbox-build-diagnostics-v2.3.1
           path: |
             firefox-build.log
             firefox-native-sandbox-changes.diff
