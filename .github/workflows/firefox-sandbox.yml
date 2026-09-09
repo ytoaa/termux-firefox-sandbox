@@ -115,6 +115,10 @@ jobs:
             firefox-native-sandbox-semantic-aarch64-v1-
             firefox-native-sandbox-sccache-aarch64-v15-
 
+      - name: Prepare Termux zram action workspace
+        shell: bash
+        run: bash portrepo/port/ci.sh prepare-zram-workspace termux-packages
+
       - name: Enable zram
         uses: ./termux-packages/.github/actions/zram
         with:
@@ -125,22 +129,22 @@ jobs:
 
       - name: Prepare Termux builder
         shell: bash
-        run: portrepo/port/ci.sh prepare-builder termux-packages
+        run: bash portrepo/port/ci.sh prepare-builder termux-packages
 
       - name: Build Firefox
         id: build-firefox
         shell: bash
-        run: portrepo/port/ci.sh build termux-packages
+        run: bash portrepo/port/ci.sh build termux-packages
 
       - name: Show sccache statistics
         if: always()
         shell: bash
-        run: portrepo/port/ci.sh stats termux-packages
+        run: bash portrepo/port/ci.sh stats termux-packages
 
       - name: Collect semantic port diagnostics
         if: always()
         shell: bash
-        run: portrepo/port/ci.sh diagnostics termux-packages
+        run: bash portrepo/port/ci.sh diagnostics termux-packages
 
       - name: Save Firefox sccache
         if: always()
@@ -153,7 +157,7 @@ jobs:
         if: success()
         shell: bash
         run: |
-          portrepo/port/ci.sh collect \
+          bash portrepo/port/ci.sh collect \
             termux-packages \
             portrepo \
             firefox-port-metadata.json \
