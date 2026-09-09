@@ -1,0 +1,19 @@
+[port]
+version = "2.4.4"
+last_validated_firefox = "155.0.1"
+policy_mode = "fail-closed"
+
+[termux]
+package = "x11-packages/firefox"
+prefix_placeholder = "@TERMUX_PREFIX@"
+
+[compatibility]
+# These are the process policies that intentionally receive the Termux
+# equivalents of Linux /usr/lib, /etc and /usr/share, read-only only.
+runtime_policy_scopes = ["Content", "RDD", "Socket", "Utility"]
+runtime_read_subdirs = ["lib", "etc", "share"]
+content_android_read_paths = ["/system/fonts"]
+
+[regression]
+content_sandbox_level = 6
+required_media_codecs = ["h264", "vp9", "av1", "aac", "opus"]
