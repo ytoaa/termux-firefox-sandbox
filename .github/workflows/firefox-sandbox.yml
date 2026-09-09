@@ -1965,13 +1965,19 @@ jobs:
               "verify_utility_proc_paths",
           )
 
+          # Validate structural policy checks rather than
+          # reconstructed runtime error-message strings.
           for token in (
               "/proc/%d/stat",
               "/proc/%d/maps",
               "expected_block",
+              "bad_patterns",
               "AddTree(rdonly,",
               "AddPrefix(rdonly,",
-              "broad /proc policy found",
+              "AddTree(rdwr,",
+              "AddPrefix(rdwr,",
+              "AddTree(rdwrcr,",
+              "AddPrefix(rdwrcr,",
           ):
               if token not in verify_proc:
                   raise SystemExit(
@@ -1979,6 +1985,11 @@ jobs:
                       f"verifier token missing: "
                       f"{token!r}"
                   )
+
+          print(
+              "PY3 Utility /proc result "
+              "verifier validation: SUCCESS"
+          )
 
           print(
               "PY3 Utility /proc result "
