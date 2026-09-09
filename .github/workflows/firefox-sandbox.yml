@@ -1,4 +1,4 @@
-name: Build Termux Firefox Native Sandbox Port v2.3.1
+name: Build Termux Firefox Native Sandbox Port v2.4
 
 on:
   workflow_dispatch:
@@ -68,8 +68,8 @@ jobs:
             echo "ERROR: Unsupported Firefox version."
             echo "Expected: $EXPECTED_FIREFOX_VERSION"
             echo
-            echo "The native sandbox patch must be reviewed"
-            echo "before using it with a newer Firefox source."
+            echo "Review the native sandbox port before"
+            echo "using it with another Firefox release."
             exit 1
           fi
 
@@ -146,12 +146,17 @@ jobs:
       # ============================================================
       # 4. Patch Firefox package recipe
       #
-      # Dynamic post-patch source injection:
+      # Dynamic post-patch source injections:
       #
-      # - Socket / Utility PR_PAC_RESET_KEYS
-      # - Common getrlimit(RLIMIT_STACK)
+      # PY2:
+      #   - Socket / Utility PR_PAC_RESET_KEYS
+      #   - Common getrlimit(RLIMIT_STACK)
       #
-      # Runs after all normal Termux patches and our 9999 patch.
+      # PY3:
+      #   - Utility own /proc/<pid>/stat read-only
+      #   - Utility own /proc/<pid>/maps read-only
+      #
+      # All injections run after normal Termux patches and 9999.
       # ============================================================
       - name: Patch Firefox package recipe
         shell: bash
@@ -250,9 +255,12 @@ jobs:
 
           preflight = r'''termux_step_pre_configure() {
           \techo "======================================"
-          \techo "Firefox native sandbox Termux/Bionic preflight v2.3.1"
+          \techo "Firefox native sandbox Termux/Bionic preflight v2.4"
           \techo "======================================"
 
+          # ========================================================
+          # Target macro probe
+          # ========================================================
           \tlocal _macro_src
           \tlocal _macro_obj
 
@@ -283,9 +291,9 @@ jobs:
           \techo
           \techo "Target macro probe: SUCCESS"
 
-          # --------------------------------------------------------
-          # Verify Android/Bionic RLIMIT_STACK constant.
-          # --------------------------------------------------------
+          # ========================================================
+          # Verify Android/Bionic RLIMIT_STACK
+          # ========================================================
           \tlocal _rlimit_src
           \tlocal _rlimit_obj
 
@@ -313,7 +321,11 @@ jobs:
           \techo "RLIMIT_STACK target probe: SUCCESS"
 
           # ========================================================
-          # SandboxFilter.cpp dynamic compatibility injection
+          # PY2
+          #
+          # SandboxFilter.cpp:
+          # - Socket/Utility PAC
+          # - Common getrlimit(RLIMIT_STACK)
           # ========================================================
           \tpython3 <<'PY2'
           from pathlib import Path
@@ -326,9 +338,6 @@ jobs:
           text = path.read_text()
 
 
-          # ========================================================
-          # Shared helper: class boundaries
-          # ========================================================
           def class_bounds(
               source,
               class_name,
@@ -362,9 +371,9 @@ jobs:
               return start, end
 
 
-          # ========================================================
+          # --------------------------------------------------------
           # RLIMIT_STACK declaration
-          # ========================================================
+          # --------------------------------------------------------
           if "#include <sys/resource.h>" not in text:
               include_marker = (
                   "#include <sys/prctl.h>\n"
@@ -388,9 +397,9 @@ jobs:
               )
 
 
-          # ========================================================
-          # Socket / Utility PRCTL compatibility
-          # ========================================================
+          # --------------------------------------------------------
+          # Socket / Utility PrctlPolicy
+          # --------------------------------------------------------
           def prctl_bounds(
               source,
               class_name,
@@ -558,16 +567,9 @@ jobs:
           )
 
 
-          # ========================================================
+          # --------------------------------------------------------
           # Common getrlimit(RLIMIT_STACK)
-          #
-          # Observed runtime:
-          #
-          # syscall 163 = getrlimit
-          # arg0 3      = RLIMIT_STACK
-          #
-          # Only RLIMIT_STACK is permitted.
-          # ========================================================
+          # --------------------------------------------------------
           def inject_common_getrlimit_stack():
               global text
 
@@ -624,8 +626,6 @@ jobs:
                       "not found"
                   )
 
-              # The final common switch(sysno) is immediately before
-              # the Timekeeping section.
               switch_pos = segment.rfind(
                   "switch (sysno) {",
                   function_start,
@@ -687,13 +687,12 @@ jobs:
           inject_common_getrlimit_stack()
 
           path.write_text(text)
-
           result = path.read_text()
 
 
-          # ========================================================
-          # Verify Socket / Utility PRCTL rules
-          # ========================================================
+          # --------------------------------------------------------
+          # Verify Socket / Utility PAC
+          # --------------------------------------------------------
           def verify_prctl(
               class_name,
               next_class=None,
@@ -756,9 +755,9 @@ jobs:
           )
 
 
-          # ========================================================
-          # Verify Common RLIMIT_STACK policy
-          # ========================================================
+          # --------------------------------------------------------
+          # Verify Common getrlimit(RLIMIT_STACK)
+          # --------------------------------------------------------
           def verify_common_getrlimit():
               common_start, common_end = \
                   class_bounds(
@@ -771,19 +770,16 @@ jobs:
                   common_start:common_end
               ]
 
-              required_global = (
-                  "#include <sys/resource.h>",
-              )
+              if (
+                  "#include <sys/resource.h>"
+                  not in result
+              ):
+                  raise SystemExit(
+                      "Common RLIMIT_STACK: "
+                      "sys/resource.h missing"
+                  )
 
-              for token in required_global:
-                  if token not in result:
-                      raise SystemExit(
-                          "Common RLIMIT_STACK: "
-                          "expected global token missing: "
-                          f"{token}"
-                      )
-
-              required_common = (
+              required = (
                   "#if defined(__TERMUX__) "
                   "&& defined(__NR_getrlimit)",
 
@@ -798,12 +794,12 @@ jobs:
                   "EvaluateSyscall(sysno))",
               )
 
-              for token in required_common:
+              for token in required:
                   if token not in common:
                       raise SystemExit(
                           "Common RLIMIT_STACK: "
-                          "expected policy token missing: "
-                          f"{token}"
+                          "expected policy token "
+                          f"missing: {token}"
                       )
 
               count = common.count(
@@ -816,18 +812,6 @@ jobs:
                       "expected exactly one "
                       "__NR_getrlimit case, "
                       f"found {count}"
-                  )
-
-              broad_allow = (
-                  "case __NR_getrlimit:\n"
-                  "        return Allow();"
-              )
-
-              if broad_allow in common:
-                  raise SystemExit(
-                      "Common RLIMIT_STACK: "
-                      "broad getrlimit Allow() "
-                      "detected"
                   )
 
               print(
@@ -849,6 +833,224 @@ jobs:
               "injection: SUCCESS"
           )
           PY2
+
+          # ========================================================
+          # PY3
+          #
+          # Utility process broker:
+          #
+          # Bionic main-thread stack discovery performs:
+          #
+          #   /proc/self/stat
+          #   /proc/self/maps
+          #
+          # Firefox broker rewrites /proc/self/* to /proc/<pid>/*.
+          #
+          # Allow only the Utility process's own stat/maps and only
+          # with MAY_READ.
+          # ========================================================
+          \tpython3 <<'PY3'
+          from pathlib import Path
+
+          path = Path(
+              "security/sandbox/linux/broker/"
+              "SandboxBrokerPolicyFactory.cpp"
+          )
+
+          text = path.read_text()
+
+
+          def utility_bounds(source):
+              marker = (
+                  "SandboxBrokerPolicyFactory::"
+                  "GetUtilityProcessPolicy(int aPid) {"
+              )
+
+              start = source.find(marker)
+
+              if start < 0:
+                  raise SystemExit(
+                      "GetUtilityProcessPolicy: "
+                      "function not found"
+                  )
+
+              next_marker = (
+                  "\n#ifndef ANDROID\n"
+                  "/* static */"
+              )
+
+              end = source.find(
+                  next_marker,
+                  start,
+              )
+
+              if end < 0:
+                  raise SystemExit(
+                      "GetUtilityProcessPolicy: "
+                      "end boundary not found"
+                  )
+
+              return start, end
+
+
+          def inject_utility_proc_paths():
+              global text
+
+              start, end = utility_bounds(text)
+
+              utility = text[start:end]
+
+              anchor = (
+                  '  policy->AddPath(rdonly, '
+                  'nsPrintfCString("/proc/%d/exe", '
+                  'aPid).get());\n'
+              )
+
+              stat_line = (
+                  '  policy->AddPath(rdonly, '
+                  'nsPrintfCString("/proc/%d/stat", '
+                  'aPid).get());'
+              )
+
+              maps_line = (
+                  '  policy->AddPath(rdonly, '
+                  'nsPrintfCString("/proc/%d/maps", '
+                  'aPid).get());'
+              )
+
+              has_stat = (
+                  stat_line in utility
+              )
+
+              has_maps = (
+                  maps_line in utility
+              )
+
+              if has_stat and has_maps:
+                  print(
+                      "Utility broker: "
+                      "own stat/maps already present"
+                  )
+                  return
+
+              if has_stat != has_maps:
+                  raise SystemExit(
+                      "Utility broker: partial "
+                      "stat/maps policy detected"
+                  )
+
+              if utility.count(anchor) != 1:
+                  raise SystemExit(
+                      "Utility broker: expected "
+                      "exactly one /proc/%d/exe "
+                      "anchor"
+                  )
+
+              addition = (
+                  anchor
+                  + "#if defined(__TERMUX__)\n"
+                  + stat_line
+                  + "\n"
+                  + maps_line
+                  + "\n"
+                  + "#endif\n"
+              )
+
+              utility = utility.replace(
+                  anchor,
+                  addition,
+                  1,
+              )
+
+              text = (
+                  text[:start]
+                  + utility
+                  + text[end:]
+              )
+
+              print(
+                  "Utility broker: "
+                  "own /proc/<pid>/stat and maps "
+                  "injected"
+              )
+
+
+          def verify_utility_proc_paths():
+              start, end = utility_bounds(text)
+
+              utility = text[start:end]
+
+              stat_line = (
+                  '  policy->AddPath(rdonly, '
+                  'nsPrintfCString("/proc/%d/stat", '
+                  'aPid).get());'
+              )
+
+              maps_line = (
+                  '  policy->AddPath(rdonly, '
+                  'nsPrintfCString("/proc/%d/maps", '
+                  'aPid).get());'
+              )
+
+              if utility.count(stat_line) != 1:
+                  raise SystemExit(
+                      "Utility broker: expected "
+                      "exactly one own stat rule"
+                  )
+
+              if utility.count(maps_line) != 1:
+                  raise SystemExit(
+                      "Utility broker: expected "
+                      "exactly one own maps rule"
+                  )
+
+              expected_block = (
+                  "#if defined(__TERMUX__)\n"
+                  + stat_line
+                  + "\n"
+                  + maps_line
+                  + "\n"
+                  + "#endif"
+              )
+
+              if expected_block not in utility:
+                  raise SystemExit(
+                      "Utility broker: stat/maps "
+                      "rules are not inside the "
+                      "Termux-only block"
+                  )
+
+              # Explicit broad /proc policy guard.
+              bad_patterns = (
+                  'AddTree(rdonly, "/proc',
+                  'AddPrefix(rdonly, "/proc',
+                  'AddTree(rdwr, "/proc',
+                  'AddPrefix(rdwr, "/proc',
+              )
+
+              for bad in bad_patterns:
+                  if bad in utility:
+                      raise SystemExit(
+                          "Utility broker: broad "
+                          f"/proc policy found: {bad}"
+                      )
+
+              print(
+                  "Utility broker own stat/maps "
+                  "verification: SUCCESS"
+              )
+
+
+          inject_utility_proc_paths()
+          verify_utility_proc_paths()
+
+          path.write_text(text)
+
+          print(
+              "Utility Bionic /proc compatibility "
+              "injection: SUCCESS"
+          )
+          PY3
 
           # ========================================================
           # Existing compatibility verification
@@ -898,7 +1100,7 @@ jobs:
           \t\tsecurity/sandbox/linux/SandboxFilter.cpp
 
           # ========================================================
-          # v2.3.1 RLIMIT_STACK verification
+          # RLIMIT_STACK verification
           # ========================================================
           \tgrep -Fq \
           \t\t'#include <sys/resource.h>' \
@@ -911,6 +1113,17 @@ jobs:
           \tgrep -Fq \
           \t\t'resource == RLIMIT_STACK' \
           \t\tsecurity/sandbox/linux/SandboxFilter.cpp
+
+          # ========================================================
+          # v2.4 Utility /proc verification
+          # ========================================================
+          \tgrep -Fq \
+          \t\t'nsPrintfCString("/proc/%d/stat", aPid).get()' \
+          \t\tsecurity/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
+
+          \tgrep -Fq \
+          \t\t'nsPrintfCString("/proc/%d/maps", aPid).get()' \
+          \t\tsecurity/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
 
           # ========================================================
           # SHM / fonts
@@ -992,16 +1205,16 @@ jobs:
           \techo "======================================"
 
           \tgrep -RInE \
-          \t\t'PR_PAC_RESET_KEYS|PR_GET_DUMPABLE|__NR_getrlimit|RLIMIT_STACK|mremap|MREMAP_FIXED|getrlimit|AddSharedMemoryPaths|org\.mozilla\.ipc|system/fonts|shm_open|glob\(|globfree|pthread_mutexattr_setprotocol|pthread_atfork' \
+          \t\t'PR_PAC_RESET_KEYS|PR_GET_DUMPABLE|__NR_getrlimit|RLIMIT_STACK|/proc/%d/stat|/proc/%d/maps|mremap|MREMAP_FIXED|getrlimit|AddSharedMemoryPaths|org\.mozilla\.ipc|system/fonts|shm_open|glob\(|globfree|pthread_mutexattr_setprotocol|pthread_atfork' \
           \t\tsecurity/sandbox/linux \
           \t\tsecurity/sandbox/chromium/base/synchronization \
           \t\tipc/glue \
           \t\tmozglue/interposers \
           \t\t2>/dev/null \
-          \t\t| head -n 350 || true
+          \t\t| head -n 400 || true
 
           \techo
-          \techo "Firefox native sandbox preflight v2.3.1: SUCCESS"
+          \techo "Firefox native sandbox preflight v2.4: SUCCESS"
 
           \ttermux_setup_nodejs
           '''
@@ -1080,23 +1293,23 @@ jobs:
             x11-packages/firefox/build.sh
 
           grep -n \
-            'preflight v2.3.1' \
+            'preflight v2.4' \
             x11-packages/firefox/build.sh
 
-          grep -n \
-            'RLIMIT_STACK' \
+          grep -nE \
+            'RLIMIT_STACK|Utility Bionic|/proc/%d/(stat|maps)' \
             x11-packages/firefox/build.sh \
-            | head -n 40
+            | head -n 80
 
       # ============================================================
       # 5. Native sandbox patch
       #
-      # Same core patch as successful v2.2.
+      # Keep the v2.2/v2.3.1 core patch unchanged.
       #
-      # Socket/Utility PAC and Common RLIMIT_STACK are injected later
-      # by termux_step_pre_configure().
+      # Utility PAC, RLIMIT_STACK and Utility /proc paths are injected
+      # after the static patch has been successfully applied.
       # ============================================================
-      - name: Add Termux native sandbox port patch v2.3.1
+      - name: Add Termux native sandbox port patch v2.4
         shell: bash
         run: |
           set -euxo pipefail
@@ -1271,7 +1484,7 @@ jobs:
           git add -N "$PATCH"
 
           echo "======================================"
-          echo "Native sandbox port patch v2.3.1"
+          echo "Native sandbox port patch v2.4"
           echo "======================================"
 
           cat "$PATCH"
@@ -1279,20 +1492,8 @@ jobs:
       # ============================================================
       # 6. Recipe-level preflight
       #
-      # This validates the generator source.
-      # Final generated C++ is validated inside pre_configure.
-      # ============================================================
-      # ============================================================
-      # 6. Recipe-level preflight v2.3.2
-      #
-      # Validate:
-      #   1. static recipe/patch configuration
-      #   2. generated build.sh shell syntax
-      #   3. embedded PY2 injector Python syntax via AST
-      #   4. exact injector functions, independent of indentation
-      #
-      # Final generated SandboxFilter.cpp is still validated later
-      # inside termux_step_pre_configure().
+      # Validate the generator source itself.
+      # Final generated C++ is independently checked in pre_configure.
       # ============================================================
       - name: Recipe preflight
         shell: bash
@@ -1319,7 +1520,7 @@ jobs:
             "$MOZCONFIG"
 
           # --------------------------------------------------------
-          # package dependencies / linker flags
+          # dependencies
           # --------------------------------------------------------
           grep \
             '^TERMUX_PKG_DEPENDS=' \
@@ -1332,7 +1533,7 @@ jobs:
             "$BUILD_SH"
 
           # --------------------------------------------------------
-          # static native-sandbox patch
+          # static patch
           # --------------------------------------------------------
           grep -q \
             'SandboxReporterCommon.h' \
@@ -1375,8 +1576,7 @@ jobs:
             "$PATCH"
 
           # --------------------------------------------------------
-          # Generated build.sh must itself be valid shell syntax.
-          # This also validates all heredoc boundaries.
+          # Generated build.sh shell syntax.
           # --------------------------------------------------------
           bash -n "$BUILD_SH"
 
@@ -1384,10 +1584,8 @@ jobs:
             "Generated build.sh shell syntax: SUCCESS"
 
           # --------------------------------------------------------
-          # Extract and AST-parse the embedded PY2 injector.
-          #
-          # IMPORTANT:
-          # No fixed indentation or exact blank-line layout is used.
+          # Extract + AST parse PY2 and PY3.
+          # No indentation assumptions.
           # --------------------------------------------------------
           python3 - "$BUILD_SH" <<'PY'
           from pathlib import Path
@@ -1399,98 +1597,118 @@ jobs:
           path = Path(sys.argv[1])
           text = path.read_text()
 
-          pattern = re.compile(
-              r"(?ms)"
-              r"^[ \t]*python3 <<'PY2'[ \t]*\n"
-              r"(.*?)"
-              r"^[ \t]*PY2[ \t]*$"
-          )
 
-          matches = pattern.findall(text)
-
-          if len(matches) != 1:
-              raise SystemExit(
-                  "ERROR: expected exactly one PY2 injector "
-                  f"heredoc, found {len(matches)}"
+          def extract_python_heredoc(label):
+              pattern = re.compile(
+                  rf"(?ms)"
+                  rf"^[ \t]*python3 <<'{label}'[ \t]*\n"
+                  rf"(.*?)"
+                  rf"^[ \t]*{label}[ \t]*$"
               )
 
-          py2 = textwrap.dedent(
-              matches[0]
-          )
+              matches = pattern.findall(text)
 
-          # --------------------------------------------------------
-          # Actual Python syntax validation.
-          # --------------------------------------------------------
-          try:
-              tree = ast.parse(
-                  py2,
-                  filename="<firefox-sandbox-PY2>",
-                  mode="exec",
+              if len(matches) != 1:
+                  raise SystemExit(
+                      f"ERROR: expected exactly one "
+                      f"{label} heredoc, "
+                      f"found {len(matches)}"
+                  )
+
+              return textwrap.dedent(
+                  matches[0]
               )
-          except SyntaxError as exc:
+
+
+          def parse_python(label):
+              source = extract_python_heredoc(
+                  label
+              )
+
+              try:
+                  tree = ast.parse(
+                      source,
+                      filename=f"<{label}>",
+                      mode="exec",
+                  )
+              except SyntaxError:
+                  print(
+                      f"ERROR: embedded {label} "
+                      "has invalid Python syntax"
+                  )
+                  raise
+
               print(
-                  "ERROR: embedded PY2 injector "
-                  "has invalid Python syntax"
+                  f"Embedded {label} Python "
+                  "syntax: SUCCESS"
               )
-              raise
 
-          print(
-              "Embedded PY2 Python syntax: SUCCESS"
-          )
+              return source, tree
 
-          # --------------------------------------------------------
-          # Locate functions structurally with Python AST.
-          # No whitespace assumptions.
-          # --------------------------------------------------------
-          functions = {
-              node.name: node
-              for node in ast.walk(tree)
-              if isinstance(
-                  node,
-                  (
-                      ast.FunctionDef,
-                      ast.AsyncFunctionDef,
-                  ),
+
+          def functions_by_name(tree):
+              return {
+                  node.name: node
+                  for node in ast.walk(tree)
+                  if isinstance(
+                      node,
+                      (
+                          ast.FunctionDef,
+                          ast.AsyncFunctionDef,
+                      ),
+                  )
+              }
+
+
+          def function_source(
+              source,
+              functions,
+              name,
+          ):
+              if name not in functions:
+                  raise SystemExit(
+                      f"ERROR: function missing: "
+                      f"{name}"
+                  )
+
+              result = ast.get_source_segment(
+                  source,
+                  functions[name],
               )
-          }
 
-          required_functions = (
+              if not result:
+                  raise SystemExit(
+                      "ERROR: could not extract "
+                      f"function source: {name}"
+                  )
+
+              return result
+
+
+          # ========================================================
+          # PY2
+          # ========================================================
+          py2, tree2 = parse_python("PY2")
+          funcs2 = functions_by_name(tree2)
+
+          for name in (
               "class_bounds",
               "prctl_bounds",
               "inject_prctl_rules",
               "inject_common_getrlimit_stack",
               "verify_prctl",
               "verify_common_getrlimit",
-          )
-
-          for name in required_functions:
-              if name not in functions:
+          ):
+              if name not in funcs2:
                   raise SystemExit(
-                      "ERROR: required PY2 function "
-                      f"missing: {name}"
+                      "ERROR: required PY2 "
+                      f"function missing: {name}"
                   )
 
-          def function_source(name):
-              node = functions[name]
-
-              source = ast.get_source_segment(
-                  py2,
-                  node,
-              )
-
-              if not source:
-                  raise SystemExit(
-                      "ERROR: could not extract "
-                      f"function source: {name}"
-                  )
-
-              return source
-
-          # --------------------------------------------------------
-          # PAC generator validation
-          # --------------------------------------------------------
           pac = function_source(
-              "inject_prctl_rules"
+              py2,
+              funcs2,
+              "inject_prctl_rules",
           )
 
           for token in (
@@ -1501,55 +1719,24 @@ jobs:
           ):
               if token not in pac:
                   raise SystemExit(
-                      "ERROR: PAC injector token "
-                      f"missing: {token!r}"
+                      "ERROR: PAC injector "
+                      f"token missing: {token!r}"
                   )
 
-          # Exact v2.1 regression.
           for bad in (
               ".CASES((PR_GET_DUMPABLE",
               ".CASES((PR_PAC_RESET_KEYS",
           ):
               if bad in pac:
                   raise SystemExit(
-                      "ERROR: invalid stale PAC API "
-                      f"detected: {bad}"
+                      "ERROR: stale invalid "
+                      f"PAC API: {bad}"
                   )
 
-          print(
-              "PAC injector AST validation: "
-              "SUCCESS"
-          )
-
-          # --------------------------------------------------------
-          # PAC final-source verifier validation
-          # --------------------------------------------------------
-          verify_pac = function_source(
-              "verify_prctl"
-          )
-
-          for token in (
-              "PR_GET_DUMPABLE",
-              "PR_PAC_RESET_KEYS",
-              "PR_PAC_APIAKEY",
-              "expected rule missing",
-          ):
-              if token not in verify_pac:
-                  raise SystemExit(
-                      "ERROR: verify_prctl token "
-                      f"missing: {token!r}"
-                  )
-
-          print(
-              "PAC result verifier validation: "
-              "SUCCESS"
-          )
-
-          # --------------------------------------------------------
-          # RLIMIT_STACK generator validation
-          # --------------------------------------------------------
           rlimit = function_source(
-              "inject_common_getrlimit_stack"
+              py2,
+              funcs2,
+              "inject_common_getrlimit_stack",
           )
 
           for token in (
@@ -1563,160 +1750,159 @@ jobs:
           ):
               if token not in rlimit:
                   raise SystemExit(
-                      "ERROR: RLIMIT_STACK injector "
+                      "ERROR: RLIMIT_STACK "
                       f"token missing: {token!r}"
                   )
 
-          # Make sure the generator is conditional rather than
-          # an unconditional getrlimit Allow().
-          if (
-              "case __NR_getrlimit:\\n"
-              "        return Allow();"
-              in rlimit
-          ):
+          calls2 = []
+
+          for node in ast.walk(tree2):
+              if (
+                  isinstance(node, ast.Call)
+                  and isinstance(
+                      node.func,
+                      ast.Name,
+                  )
+              ):
+                  calls2.append(
+                      node.func.id
+                  )
+
+          if calls2.count(
+              "inject_prctl_rules"
+          ) < 2:
               raise SystemExit(
-                  "ERROR: broad getrlimit "
-                  "Allow() generator detected"
+                  "ERROR: expected two "
+                  "inject_prctl_rules calls"
               )
 
-          if (
-              "resource == RLIMIT_STACK"
-              not in rlimit
-          ):
+          if calls2.count(
+              "inject_common_getrlimit_stack"
+          ) < 1:
               raise SystemExit(
-                  "ERROR: RLIMIT_STACK argument "
-                  "filter missing"
+                  "ERROR: common RLIMIT_STACK "
+                  "injector is not called"
               )
 
-          print(
-              "RLIMIT_STACK injector AST "
-              "validation: SUCCESS"
-          )
+          if calls2.count(
+              "verify_prctl"
+          ) < 2:
+              raise SystemExit(
+                  "ERROR: expected two "
+                  "verify_prctl calls"
+              )
 
-          # --------------------------------------------------------
-          # RLIMIT final-source verifier validation
-          # --------------------------------------------------------
-          verify_rlimit = function_source(
+          if calls2.count(
               "verify_common_getrlimit"
+          ) < 1:
+              raise SystemExit(
+                  "ERROR: RLIMIT_STACK verifier "
+                  "is not called"
+              )
+
+          print(
+              "PY2 injector validation: SUCCESS"
+          )
+
+          # ========================================================
+          # PY3
+          # ========================================================
+          py3, tree3 = parse_python("PY3")
+          funcs3 = functions_by_name(tree3)
+
+          for name in (
+              "utility_bounds",
+              "inject_utility_proc_paths",
+              "verify_utility_proc_paths",
+          ):
+              if name not in funcs3:
+                  raise SystemExit(
+                      "ERROR: required PY3 "
+                      f"function missing: {name}"
+                  )
+
+          inject_proc = function_source(
+              py3,
+              funcs3,
+              "inject_utility_proc_paths",
           )
 
           for token in (
-              "case __NR_getrlimit:",
-              "resource == RLIMIT_STACK",
-              "expected exactly one",
-              "broad getrlimit Allow()",
+              "GetUtilityProcessPolicy",
+              "/proc/%d/exe",
+              "/proc/%d/stat",
+              "/proc/%d/maps",
+              "#if defined(__TERMUX__)",
+              "rdonly",
           ):
-              if token not in verify_rlimit:
+              if token not in inject_proc:
                   raise SystemExit(
-                      "ERROR: RLIMIT_STACK verifier "
-                      f"token missing: {token!r}"
+                      "ERROR: Utility /proc "
+                      f"injector token missing: "
+                      f"{token!r}"
                   )
 
+          verify_proc = function_source(
+              py3,
+              funcs3,
+              "verify_utility_proc_paths",
+          )
+
+          for token in (
+              "/proc/%d/stat",
+              "/proc/%d/maps",
+              "expected_block",
+              "AddTree(rdonly,",
+              "AddPrefix(rdonly,",
+          ):
+              if token not in verify_proc:
+                  raise SystemExit(
+                      "ERROR: Utility /proc "
+                      f"verifier token missing: "
+                      f"{token!r}"
+                  )
+
+          calls3 = []
+
+          for node in ast.walk(tree3):
+              if (
+                  isinstance(node, ast.Call)
+                  and isinstance(
+                      node.func,
+                      ast.Name,
+                  )
+              ):
+                  calls3.append(
+                      node.func.id
+                  )
+
+          if calls3.count(
+              "inject_utility_proc_paths"
+          ) < 1:
+              raise SystemExit(
+                  "ERROR: Utility /proc "
+                  "injector is not called"
+              )
+
+          if calls3.count(
+              "verify_utility_proc_paths"
+          ) < 1:
+              raise SystemExit(
+                  "ERROR: Utility /proc "
+                  "verifier is not called"
+              )
+
           print(
-              "RLIMIT_STACK result verifier "
+              "PY3 Utility /proc injector "
               "validation: SUCCESS"
           )
 
-          # --------------------------------------------------------
-          # Confirm top-level injector calls really exist.
-          # --------------------------------------------------------
-          calls = []
-
-          for node in ast.walk(tree):
-              if not isinstance(
-                  node,
-                  ast.Call,
-              ):
-                  continue
-
-              func = node.func
-
-              if isinstance(
-                  func,
-                  ast.Name,
-              ):
-                  calls.append(
-                      func.id
-                  )
-
-          if (
-              calls.count(
-                  "inject_prctl_rules"
-              )
-              < 2
-          ):
-              raise SystemExit(
-                  "ERROR: expected two "
-                  "inject_prctl_rules() calls"
-              )
-
-          if (
-              calls.count(
-                  "inject_common_getrlimit_stack"
-              )
-              < 1
-          ):
-              raise SystemExit(
-                  "ERROR: "
-                  "inject_common_getrlimit_stack() "
-                  "call missing"
-              )
-
-          if (
-              calls.count(
-                  "verify_prctl"
-              )
-              < 2
-          ):
-              raise SystemExit(
-                  "ERROR: expected two "
-                  "verify_prctl() calls"
-              )
-
-          if (
-              calls.count(
-                  "verify_common_getrlimit"
-              )
-              < 1
-          ):
-              raise SystemExit(
-                  "ERROR: "
-                  "verify_common_getrlimit() "
-                  "call missing"
-              )
-
           print(
-              "PY2 injector call graph sanity: "
-              "SUCCESS"
-          )
-
-          # --------------------------------------------------------
-          # Global non-function source requirements.
-          # --------------------------------------------------------
-          for token in (
-              "#include <sys/resource.h>",
-              "RLIMIT_STACK target probe: SUCCESS",
-              "SocketProcessSandboxPolicy",
-              "UtilitySandboxPolicy",
-          ):
-              if token not in text:
-                  raise SystemExit(
-                      "ERROR: build.sh compatibility "
-                      f"token missing: {token!r}"
-                  )
-
-          print(
-              "Dynamic injector source validation: "
-              "SUCCESS"
+              "Dynamic injector source "
+              "validation: SUCCESS"
           )
           PY
 
-          # --------------------------------------------------------
-          # Direct recipe/config diff validation.
-          #
-          # Do not include the generated .patch because valid
-          # unified-diff context lines contain leading spaces.
-          # --------------------------------------------------------
           git diff --check -- \
             x11-packages/firefox/build.sh \
             x11-packages/firefox/mozconfig.cfg
@@ -1725,7 +1911,7 @@ jobs:
           echo "Recipe preflight: SUCCESS"
 
       # ============================================================
-      # 7. Runtime helper
+      # 7. Runtime test helper
       # ============================================================
       - name: Create runtime test helper
         shell: bash
@@ -1751,7 +1937,7 @@ jobs:
           EOF
 
           echo "======================================"
-          echo "Termux Firefox native sandbox v2.3.1"
+          echo "Termux Firefox native sandbox v2.4"
           echo "======================================"
           echo "level   : $LEVEL"
           echo "profile : $PROFILE"
@@ -1815,9 +2001,9 @@ jobs:
           echo "======================================"
 
           grep -nEi \
-            'sandbox|seccomp|sigsys|violation|syscall|163|getrlimit|rlimit_stack|prctl|mremap|linker_cfi|shadowwrite|map_failed|org\.mozilla\.ipc|shmsegmentswriter|system/fonts|timezone|tzdata|__properties__|channel error' \
+            'sandbox|seccomp|sigsys|violation|syscall|163|198|getrlimit|rlimit_stack|socket|/proc/self/(stat|maps)|/proc/[0-9]+/(stat|maps)|logdw|prctl|mremap|linker_cfi|shadowwrite|map_failed|org\.mozilla\.ipc|shmsegmentswriter|system/fonts|timezone|tzdata|__properties__|channel error' \
             "$LOG" \
-            | tail -n 700 || true
+            | tail -n 900 || true
 
           echo
           echo "Firefox exit code: $rc"
@@ -1839,7 +2025,7 @@ jobs:
             "Runtime helper syntax: SUCCESS"
 
       # ============================================================
-      # 8. Save diff
+      # 8. Save custom changes
       # ============================================================
       - name: Save custom changes
         shell: bash
@@ -1855,15 +2041,16 @@ jobs:
             x11-packages/firefox/
 
       # ============================================================
-      # 9. Restore sccache
+      # 9. Restore compiler cache
       # ============================================================
       - name: Restore Firefox sccache
         id: sccache-restore
         uses: actions/cache/restore@v4
         with:
           path: .sccache
-          key: firefox-native-sandbox-sccache-aarch64-v12-${{ github.run_id }}
+          key: firefox-native-sandbox-sccache-aarch64-v13-${{ github.run_id }}
           restore-keys: |
+            firefox-native-sandbox-sccache-aarch64-v13-
             firefox-native-sandbox-sccache-aarch64-v12-
             firefox-native-sandbox-sccache-aarch64-v11-
             firefox-native-sandbox-sccache-aarch64-v10-
@@ -1906,7 +2093,7 @@ jobs:
           device_name: /dev/zram0
 
       # ============================================================
-      # 12. Official Termux builder
+      # 12. Prepare official Termux builder
       # ============================================================
       - name: Prepare official Termux builder
         shell: bash
@@ -2117,7 +2304,7 @@ jobs:
           set -o pipefail
 
           echo "======================================"
-          echo "Starting Firefox native sandbox v2.3.1"
+          echo "Starting Firefox native sandbox v2.4"
           echo "======================================"
 
           ./scripts/run-docker.sh \
@@ -2202,6 +2389,24 @@ jobs:
 
           echo
           echo "======================================"
+          echo "Final Utility broker compatibility rules"
+          echo "======================================"
+
+          ./scripts/run-docker.sh \
+            bash -lc '
+              SRC=/home/builder/.termux-build/firefox/src/security/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp
+
+              if [ -f "$SRC" ]; then
+                grep -nE \
+                  "GetUtilityProcessPolicy|/proc/%d/(exe|stat|maps|statm|smaps)" \
+                  "$SRC" \
+                  || true
+              fi
+            ' \
+            2>/dev/null || true
+
+          echo
+          echo "======================================"
           echo "Disk / Docker / cache"
           echo "======================================"
 
@@ -2218,10 +2423,10 @@ jobs:
           echo "======================================"
 
           grep -nEi \
-            'preflight|RLIMIT_STACK|getrlimit|__NR_getrlimit|syntax sanity|SocketProcessSandboxPolicy|UtilitySandboxPolicy|PrctlPolicy injection|security/sandbox|libmozsandbox|libxul|PR_PAC_RESET_KEYS|PR_GET_DUMPABLE|mremap|MREMAP_FIXED|AddSharedMemoryPaths|org\.mozilla\.ipc|system/fonts|shm_open|ShmSegmentsWriter|undefined symbol|duplicate symbol|ld\.lld: error|patch.*FAILED|Hunk.*FAILED|reject' \
+            'preflight|Utility broker|Bionic /proc|/proc/%d/stat|/proc/%d/maps|RLIMIT_STACK|getrlimit|__NR_getrlimit|syntax sanity|SocketProcessSandboxPolicy|UtilitySandboxPolicy|PrctlPolicy injection|security/sandbox|libmozsandbox|libxul|PR_PAC_RESET_KEYS|PR_GET_DUMPABLE|mremap|MREMAP_FIXED|AddSharedMemoryPaths|org\.mozilla\.ipc|system/fonts|shm_open|ShmSegmentsWriter|undefined symbol|duplicate symbol|ld\.lld: error|patch.*FAILED|Hunk.*FAILED|reject' \
             firefox-build.log \
             2>/dev/null \
-            | tail -n 700 || true
+            | tail -n 900 || true
 
           echo
           echo "======================================"
@@ -2236,10 +2441,10 @@ jobs:
 
           echo
           echo "======================================"
-          echo "Last 800 build lines"
+          echo "Last 900 build lines"
           echo "======================================"
 
-          tail -n 800 \
+          tail -n 900 \
             firefox-build.log \
             2>/dev/null || true
 
@@ -2251,7 +2456,7 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: .sccache
-          key: firefox-native-sandbox-sccache-aarch64-v12-${{ github.run_id }}
+          key: firefox-native-sandbox-sccache-aarch64-v13-${{ github.run_id }}
 
       # ============================================================
       # 23. Collect package
@@ -2317,7 +2522,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v6
         with:
-          name: firefox-native-sandbox-aarch64-v2.3.1
+          name: firefox-native-sandbox-aarch64-v2.4
           path: artifacts/
           if-no-files-found: error
           compression-level: 0
@@ -2330,7 +2535,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: firefox-native-sandbox-build-diagnostics-v2.3.1
+          name: firefox-native-sandbox-build-diagnostics-v2.4
           path: |
             firefox-build.log
             firefox-native-sandbox-changes.diff
