@@ -1,4 +1,4 @@
-name: Build Termux Firefox Native Sandbox Port v2.4.1
+name: Build Termux Firefox Native Sandbox Port v2.4.3
 
 on:
   workflow_dispatch:
@@ -153,8 +153,6 @@ jobs:
       # PY3:
       #   - Utility own /proc/<pid>/stat read-only
       #   - Utility own /proc/<pid>/maps read-only
-      #
-      # All run after normal Termux patches and 9999 patch.
       # ============================================================
       - name: Patch Firefox package recipe
         shell: bash
@@ -253,7 +251,7 @@ jobs:
 
           preflight = r'''termux_step_pre_configure() {
           \techo "======================================"
-          \techo "Firefox native sandbox Termux/Bionic preflight v2.4.1"
+          \techo "Firefox native sandbox Termux/Bionic preflight v2.4.3"
           \techo "======================================"
 
           # ========================================================
@@ -290,7 +288,7 @@ jobs:
           \techo "Target macro probe: SUCCESS"
 
           # ========================================================
-          # Verify Android/Bionic RLIMIT_STACK
+          # RLIMIT_STACK probe
           # ========================================================
           \tlocal _rlimit_src
           \tlocal _rlimit_obj
@@ -365,9 +363,6 @@ jobs:
               return start, end
 
 
-          # --------------------------------------------------------
-          # RLIMIT_STACK declaration
-          # --------------------------------------------------------
           if "#include <sys/resource.h>" not in text:
               include_marker = (
                   "#include <sys/prctl.h>\n"
@@ -391,9 +386,6 @@ jobs:
               )
 
 
-          # --------------------------------------------------------
-          # Socket / Utility PrctlPolicy
-          # --------------------------------------------------------
           def prctl_bounds(
               source,
               class_name,
@@ -561,9 +553,6 @@ jobs:
           )
 
 
-          # --------------------------------------------------------
-          # Common getrlimit(RLIMIT_STACK)
-          # --------------------------------------------------------
           def inject_common_getrlimit_stack():
               global text
 
@@ -684,9 +673,6 @@ jobs:
           result = path.read_text()
 
 
-          # --------------------------------------------------------
-          # Verify Socket / Utility PAC
-          # --------------------------------------------------------
           def verify_prctl(
               class_name,
               next_class=None,
@@ -749,9 +735,6 @@ jobs:
           )
 
 
-          # --------------------------------------------------------
-          # Verify Common getrlimit(RLIMIT_STACK)
-          # --------------------------------------------------------
           def verify_common_getrlimit():
               common_start, common_end = \
                   class_bounds(
@@ -808,7 +791,6 @@ jobs:
                       f"found {count}"
                   )
 
-              # Final source must be argument-filtered.
               case_pos = common.find(
                   "case __NR_getrlimit:"
               )
@@ -877,19 +859,7 @@ jobs:
           PY2
 
           # ========================================================
-          # PY3: Utility process broker
-          #
-          # Bionic main-thread stack discovery:
-          #
-          #   /proc/self/stat
-          #   /proc/self/maps
-          #
-          # Firefox rewrites them to:
-          #
-          #   /proc/<pid>/stat
-          #   /proc/<pid>/maps
-          #
-          # Only Utility's own PID and only MAY_READ are added.
+          # PY3: Utility Bionic /proc compatibility
           # ========================================================
           \tpython3 <<'PY3'
           from pathlib import Path
@@ -916,21 +886,33 @@ jobs:
                       "function not found"
                   )
 
-              next_marker = (
-                  "\n#ifndef ANDROID\n"
-                  "/* static */"
+              # Firefox 155.0.1:
+              # GetUtilityProcessPolicy is the final broker-policy
+              # function. Locate the function's own canonical tail
+              # instead of assuming another function follows it.
+              tail = (
+                  "  if (policy->IsEmpty()) {\n"
+                  "    policy = nullptr;\n"
+                  "  }\n"
+                  "  return policy;\n"
+                  "}\n"
               )
 
-              end = source.find(
-                  next_marker,
+              tail_pos = source.find(
+                  tail,
                   start,
               )
 
-              if end < 0:
+              if tail_pos < 0:
                   raise SystemExit(
                       "GetUtilityProcessPolicy: "
-                      "end boundary not found"
+                      "function tail not found"
                   )
+
+              end = (
+                  tail_pos
+                  + len(tail)
+              )
 
               return start, end
 
@@ -1062,7 +1044,6 @@ jobs:
                       "Termux-only block"
                   )
 
-              # No broad /proc tree/prefix permissions.
               bad_patterns = (
                   'AddTree(rdonly, "/proc',
                   'AddPrefix(rdonly, "/proc',
@@ -1143,9 +1124,6 @@ jobs:
           \t\t'MREMAP_MAYMOVE | MREMAP_FIXED' \
           \t\tsecurity/sandbox/linux/SandboxFilter.cpp
 
-          # ========================================================
-          # RLIMIT_STACK verification
-          # ========================================================
           \tgrep -Fq \
           \t\t'#include <sys/resource.h>' \
           \t\tsecurity/sandbox/linux/SandboxFilter.cpp
@@ -1159,7 +1137,7 @@ jobs:
           \t\tsecurity/sandbox/linux/SandboxFilter.cpp
 
           # ========================================================
-          # v2.4.1 Utility /proc verification
+          # Utility /proc verification
           # ========================================================
           \tgrep -Fq \
           \t\t'nsPrintfCString("/proc/%d/stat", aPid).get()' \
@@ -1188,7 +1166,7 @@ jobs:
           \techo "Sandbox source verification: SUCCESS"
 
           # ========================================================
-          # libandroid-glob
+          # libandroid-glob target link test
           # ========================================================
           \tif [[ \
           \t\t! -e "$TERMUX_PREFIX/lib/libandroid-glob.so" \
@@ -1258,7 +1236,7 @@ jobs:
           \t\t| head -n 400 || true
 
           \techo
-          \techo "Firefox native sandbox preflight v2.4.1: SUCCESS"
+          \techo "Firefox native sandbox preflight v2.4.3: SUCCESS"
 
           \ttermux_setup_nodejs
           '''
@@ -1337,7 +1315,7 @@ jobs:
             x11-packages/firefox/build.sh
 
           grep -n \
-            'preflight v2.4.1' \
+            'preflight v2.4.3' \
             x11-packages/firefox/build.sh
 
           grep -nE \
@@ -1347,10 +1325,8 @@ jobs:
 
       # ============================================================
       # 5. Static native sandbox patch
-      #
-      # Same core patch as the successful v2.2/v2.3.1 line.
       # ============================================================
-      - name: Add Termux native sandbox port patch v2.4.1
+      - name: Add Termux native sandbox port patch v2.4.3
         shell: bash
         run: |
           set -euxo pipefail
@@ -1525,16 +1501,13 @@ jobs:
           git add -N "$PATCH"
 
           echo "======================================"
-          echo "Native sandbox port patch v2.4.1"
+          echo "Native sandbox port patch v2.4.3"
           echo "======================================"
 
           cat "$PATCH"
 
       # ============================================================
-      # 6. Recipe-level preflight v2.4.1
-      #
-      # Validate generator source structurally with AST.
-      # Final generated C++ is separately validated in pre_configure.
+      # 6. Recipe-level AST preflight
       # ============================================================
       - name: Recipe preflight
         shell: bash
@@ -1545,9 +1518,6 @@ jobs:
           MOZCONFIG="x11-packages/firefox/mozconfig.cfg"
           PATCH="x11-packages/firefox/9999-termux-native-sandbox.patch"
 
-          # --------------------------------------------------------
-          # mozconfig
-          # --------------------------------------------------------
           grep -q \
             '^ac_add_options --enable-sandbox$' \
             "$MOZCONFIG"
@@ -1560,9 +1530,6 @@ jobs:
             '^ac_add_options --with-ccache=sccache$' \
             "$MOZCONFIG"
 
-          # --------------------------------------------------------
-          # dependencies
-          # --------------------------------------------------------
           grep \
             '^TERMUX_PKG_DEPENDS=' \
             "$BUILD_SH" \
@@ -1573,9 +1540,6 @@ jobs:
             -- '-landroid-glob' \
             "$BUILD_SH"
 
-          # --------------------------------------------------------
-          # static patch
-          # --------------------------------------------------------
           grep -q \
             'SandboxReporterCommon.h' \
             "$PATCH"
@@ -1616,17 +1580,11 @@ jobs:
             '#if defined(ANDROID) && !defined(__TERMUX__)' \
             "$PATCH"
 
-          # --------------------------------------------------------
-          # build.sh shell syntax + heredoc boundary validation
-          # --------------------------------------------------------
           bash -n "$BUILD_SH"
 
           echo \
             "Generated build.sh shell syntax: SUCCESS"
 
-          # --------------------------------------------------------
-          # Extract and AST-parse PY2 / PY3.
-          # --------------------------------------------------------
           python3 - "$BUILD_SH" <<'PY'
           from pathlib import Path
           import ast
@@ -1665,18 +1623,11 @@ jobs:
                   label
               )
 
-              try:
-                  tree = ast.parse(
-                      source,
-                      filename=f"<{label}>",
-                      mode="exec",
-                  )
-              except SyntaxError:
-                  print(
-                      f"ERROR: embedded {label} "
-                      "has invalid Python syntax"
-                  )
-                  raise
+              tree = ast.parse(
+                  source,
+                  filename=f"<{label}>",
+                  mode="exec",
+              )
 
               print(
                   f"Embedded {label} Python "
@@ -1725,9 +1676,6 @@ jobs:
               return result
 
 
-          # ========================================================
-          # PY2 validation
-          # ========================================================
           py2, tree2 = parse_python("PY2")
           funcs2 = functions_by_name(tree2)
 
@@ -1773,24 +1721,6 @@ jobs:
                       f"PAC API: {bad}"
                   )
 
-          verify_pac = function_source(
-              py2,
-              funcs2,
-              "verify_prctl",
-          )
-
-          for token in (
-              "PR_GET_DUMPABLE",
-              "PR_PAC_RESET_KEYS",
-              "PR_PAC_APIAKEY",
-              "expected rule missing",
-          ):
-              if token not in verify_pac:
-                  raise SystemExit(
-                      "ERROR: PAC verifier "
-                      f"token missing: {token!r}"
-                  )
-
           rlimit = function_source(
               py2,
               funcs2,
@@ -1798,8 +1728,6 @@ jobs:
           )
 
           for token in (
-              "SandboxPolicyCommon",
-              "ContentSandboxPolicy",
               "case __NR_getrlimit:",
               "Arg<int> resource(0);",
               "resource == RLIMIT_STACK",
@@ -1810,27 +1738,6 @@ jobs:
                   raise SystemExit(
                       "ERROR: RLIMIT_STACK "
                       f"injector token missing: "
-                      f"{token!r}"
-                  )
-
-          verify_rlimit = function_source(
-              py2,
-              funcs2,
-              "verify_common_getrlimit",
-          )
-
-          for token in (
-              "case __NR_getrlimit:",
-              "Arg<int> resource(0);",
-              "resource == RLIMIT_STACK",
-              "SandboxPolicyBase::",
-              "EvaluateSyscall(sysno)",
-              "broad getrlimit Allow()",
-          ):
-              if token not in verify_rlimit:
-                  raise SystemExit(
-                      "ERROR: RLIMIT_STACK "
-                      f"verifier token missing: "
                       f"{token!r}"
                   )
 
@@ -1860,8 +1767,8 @@ jobs:
               "inject_common_getrlimit_stack"
           ) < 1:
               raise SystemExit(
-                  "ERROR: common RLIMIT_STACK "
-                  "injector is not called"
+                  "ERROR: RLIMIT_STACK injector "
+                  "is not called"
               )
 
           if calls2.count(
@@ -1884,9 +1791,6 @@ jobs:
               "PY2 injector validation: SUCCESS"
           )
 
-          # ========================================================
-          # PY3 validation
-          # ========================================================
           py3, tree3 = parse_python("PY3")
           funcs3 = functions_by_name(tree3)
 
@@ -1901,25 +1805,39 @@ jobs:
                       f"function missing: {name}"
                   )
 
-          # --------------------------------------------------------
-          # Correct location for GetUtilityProcessPolicy validation.
-          # --------------------------------------------------------
-          utility_locator = function_source(
-              py3,
-              funcs3,
-              "utility_bounds",
+          locator_node = funcs3[
+              "utility_bounds"
+          ]
+
+          locator_literals = "\n".join(
+              node.value
+              for node in ast.walk(
+                  locator_node
+              )
+              if (
+                  isinstance(node, ast.Constant)
+                  and isinstance(
+                      node.value,
+                      str,
+                  )
+              )
           )
 
           for token in (
-              "GetUtilityProcessPolicy",
-              "SandboxBrokerPolicyFactory::",
-              "function not found",
-              "end boundary not found",
+              "SandboxBrokerPolicyFactory::"
+              "GetUtilityProcessPolicy(int aPid) {",
+
+              "if (policy->IsEmpty()) {",
+
+              "return policy;",
+
+              "function tail not found",
           ):
-              if token not in utility_locator:
+              if token not in locator_literals:
                   raise SystemExit(
                       "ERROR: Utility locator "
-                      f"token missing: {token!r}"
+                      "literal missing: "
+                      f"{token!r}"
                   )
 
           print(
@@ -1927,9 +1845,6 @@ jobs:
               "validation: SUCCESS"
           )
 
-          # --------------------------------------------------------
-          # Injector body
-          # --------------------------------------------------------
           inject_proc = function_source(
               py3,
               funcs3,
@@ -1956,17 +1871,12 @@ jobs:
               "body validation: SUCCESS"
           )
 
-          # --------------------------------------------------------
-          # Final-source verifier
-          # --------------------------------------------------------
           verify_proc = function_source(
               py3,
               funcs3,
               "verify_utility_proc_paths",
           )
 
-          # Validate structural policy checks rather than
-          # reconstructed runtime error-message strings.
           for token in (
               "/proc/%d/stat",
               "/proc/%d/maps",
@@ -1991,14 +1901,6 @@ jobs:
               "verifier validation: SUCCESS"
           )
 
-          print(
-              "PY3 Utility /proc result "
-              "verifier validation: SUCCESS"
-          )
-
-          # --------------------------------------------------------
-          # PY3 call graph
-          # --------------------------------------------------------
           calls3 = []
 
           for node in ast.walk(tree3):
@@ -2048,9 +1950,6 @@ jobs:
           )
           PY
 
-          # --------------------------------------------------------
-          # Directly modified recipe/config syntax
-          # --------------------------------------------------------
           git diff --check -- \
             x11-packages/firefox/build.sh \
             x11-packages/firefox/mozconfig.cfg
@@ -2059,7 +1958,301 @@ jobs:
           echo "Recipe preflight: SUCCESS"
 
       # ============================================================
-      # 7. Runtime helper
+      # 7. Exact Firefox source-shape simulation
+      #
+      # This happens BEFORE the full Firefox source/build download.
+      #
+      # It executes the exact PY2/PY3 generators against the small
+      # upstream 155.0.1 sandbox source files.
+      # ============================================================
+      - name: Firefox 155.0.1 source-shape preflight
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          BUILD_SH="x11-packages/firefox/build.sh"
+
+          FIREFOX_TAG="FIREFOX_155_0_1_RELEASE"
+
+          BASE_URL="https://raw.githubusercontent.com/mozilla-firefox/firefox/${FIREFOX_TAG}"
+
+          SIM_ROOT="$RUNNER_TEMP/firefox-sandbox-source-shape-v2.4.3"
+
+          FILTER_REL="security/sandbox/linux/SandboxFilter.cpp"
+
+          BROKER_REL="security/sandbox/linux/broker/SandboxBrokerPolicyFactory.cpp"
+
+          rm -rf "$SIM_ROOT"
+
+          mkdir -p \
+            "$SIM_ROOT/$(dirname "$FILTER_REL")" \
+            "$SIM_ROOT/$(dirname "$BROKER_REL")"
+
+          curl \
+            --fail \
+            --location \
+            --silent \
+            --show-error \
+            --retry 3 \
+            --retry-delay 2 \
+            "$BASE_URL/$FILTER_REL" \
+            -o "$SIM_ROOT/$FILTER_REL"
+
+          curl \
+            --fail \
+            --location \
+            --silent \
+            --show-error \
+            --retry 3 \
+            --retry-delay 2 \
+            "$BASE_URL/$BROKER_REL" \
+            -o "$SIM_ROOT/$BROKER_REL"
+
+          test -s \
+            "$SIM_ROOT/$FILTER_REL"
+
+          test -s \
+            "$SIM_ROOT/$BROKER_REL"
+
+          grep -Fq \
+            'class SandboxPolicyCommon' \
+            "$SIM_ROOT/$FILTER_REL"
+
+          grep -Fq \
+            'class SocketProcessSandboxPolicy' \
+            "$SIM_ROOT/$FILTER_REL"
+
+          grep -Fq \
+            'class UtilitySandboxPolicy' \
+            "$SIM_ROOT/$FILTER_REL"
+
+          grep -Fq \
+            'SandboxBrokerPolicyFactory::GetUtilityProcessPolicy(int aPid) {' \
+            "$SIM_ROOT/$BROKER_REL"
+
+          grep -Fq \
+            'nsPrintfCString("/proc/%d/exe", aPid).get()' \
+            "$SIM_ROOT/$BROKER_REL"
+
+          # --------------------------------------------------------
+          # Extract the exact PY2/PY3 programs currently embedded
+          # in build.sh.
+          # --------------------------------------------------------
+          python3 \
+            - "$BUILD_SH" "$SIM_ROOT" <<'PY'
+          from pathlib import Path
+          import re
+          import sys
+          import textwrap
+
+          build_sh = Path(
+              sys.argv[1]
+          ).read_text()
+
+          root = Path(
+              sys.argv[2]
+          )
+
+          for label in (
+              "PY2",
+              "PY3",
+          ):
+              pattern = re.compile(
+                  rf"(?ms)"
+                  rf"^[ \t]*python3 <<'{label}'[ \t]*\n"
+                  rf"(.*?)"
+                  rf"^[ \t]*{label}[ \t]*$"
+              )
+
+              matches = pattern.findall(
+                  build_sh
+              )
+
+              if len(matches) != 1:
+                  raise SystemExit(
+                      f"ERROR: expected exactly one "
+                      f"{label} heredoc, "
+                      f"found {len(matches)}"
+                  )
+
+              source = textwrap.dedent(
+                  matches[0]
+              )
+
+              compile(
+                  source,
+                  f"<{label}>",
+                  "exec",
+              )
+
+              (
+                  root
+                  / f"{label}.py"
+              ).write_text(
+                  source
+              )
+
+              print(
+                  f"{label} extracted for "
+                  "source-shape simulation: "
+                  "SUCCESS"
+              )
+          PY
+
+          echo
+          echo "======================================"
+          echo "Executing PY2 on exact Firefox source"
+          echo "======================================"
+
+          (
+            cd "$SIM_ROOT"
+
+            python3 PY2.py
+          )
+
+          echo
+          echo "======================================"
+          echo "Executing PY3 on exact Firefox source"
+          echo "======================================"
+
+          (
+            cd "$SIM_ROOT"
+
+            python3 PY3.py
+          )
+
+          echo
+          echo "======================================"
+          echo "Verifying simulated final source"
+          echo "======================================"
+
+          grep -Fq \
+            '#include <sys/resource.h>' \
+            "$SIM_ROOT/$FILTER_REL"
+
+          grep -Fq \
+            'case __NR_getrlimit:' \
+            "$SIM_ROOT/$FILTER_REL"
+
+          grep -Fq \
+            'resource == RLIMIT_STACK' \
+            "$SIM_ROOT/$FILTER_REL"
+
+          grep -Fq \
+            '.Case(PR_GET_DUMPABLE, Allow())' \
+            "$SIM_ROOT/$FILTER_REL"
+
+          grep -Fq \
+            '.Case(PR_PAC_RESET_KEYS,' \
+            "$SIM_ROOT/$FILTER_REL"
+
+          grep -Fq \
+            'nsPrintfCString("/proc/%d/stat", aPid).get()' \
+            "$SIM_ROOT/$BROKER_REL"
+
+          grep -Fq \
+            'nsPrintfCString("/proc/%d/maps", aPid).get()' \
+            "$SIM_ROOT/$BROKER_REL"
+
+          python3 \
+            - "$SIM_ROOT/$BROKER_REL" <<'PY'
+          from pathlib import Path
+          import sys
+
+          text = Path(
+              sys.argv[1]
+          ).read_text()
+
+          marker = (
+              "SandboxBrokerPolicyFactory::"
+              "GetUtilityProcessPolicy(int aPid) {"
+          )
+
+          start = text.find(marker)
+
+          if start < 0:
+              raise SystemExit(
+                  "ERROR: Utility function missing "
+                  "after simulation"
+              )
+
+          tail = (
+              "  if (policy->IsEmpty()) {\n"
+              "    policy = nullptr;\n"
+              "  }\n"
+              "  return policy;\n"
+              "}\n"
+          )
+
+          tail_pos = text.find(
+              tail,
+              start,
+          )
+
+          if tail_pos < 0:
+              raise SystemExit(
+                  "ERROR: Utility function tail "
+                  "missing after simulation"
+              )
+
+          utility = text[
+              start:
+              tail_pos + len(tail)
+          ]
+
+          stat_line = (
+              'policy->AddPath(rdonly, '
+              'nsPrintfCString("/proc/%d/stat", '
+              'aPid).get());'
+          )
+
+          maps_line = (
+              'policy->AddPath(rdonly, '
+              'nsPrintfCString("/proc/%d/maps", '
+              'aPid).get());'
+          )
+
+          if utility.count(
+              stat_line
+          ) != 1:
+              raise SystemExit(
+                  "ERROR: simulated Utility "
+                  "stat rule count != 1"
+              )
+
+          if utility.count(
+              maps_line
+          ) != 1:
+              raise SystemExit(
+                  "ERROR: simulated Utility "
+                  "maps rule count != 1"
+              )
+
+          for bad in (
+              'AddTree(rdonly, "/proc',
+              'AddPrefix(rdonly, "/proc',
+              'AddTree(rdwr, "/proc',
+              'AddPrefix(rdwr, "/proc',
+              'AddTree(rdwrcr, "/proc',
+              'AddPrefix(rdwrcr, "/proc',
+          ):
+              if bad in utility:
+                  raise SystemExit(
+                      "ERROR: simulated broad "
+                      f"/proc policy: {bad}"
+                  )
+
+          print(
+              "Exact Utility broker simulation "
+              "verification: SUCCESS"
+          )
+          PY
+
+          echo
+          echo "Firefox 155.0.1 source-shape preflight: SUCCESS"
+
+      # ============================================================
+      # 8. Runtime helper
       # ============================================================
       - name: Create runtime test helper
         shell: bash
@@ -2085,7 +2278,7 @@ jobs:
           EOF
 
           echo "======================================"
-          echo "Termux Firefox native sandbox v2.4.1"
+          echo "Termux Firefox native sandbox v2.4.3"
           echo "======================================"
           echo "level   : $LEVEL"
           echo "profile : $PROFILE"
@@ -2173,7 +2366,7 @@ jobs:
             "Runtime helper syntax: SUCCESS"
 
       # ============================================================
-      # 8. Save custom changes
+      # 9. Save custom changes
       # ============================================================
       - name: Save custom changes
         shell: bash
@@ -2189,15 +2382,16 @@ jobs:
             x11-packages/firefox/
 
       # ============================================================
-      # 9. Restore compiler cache
+      # 10. Restore compiler cache
       # ============================================================
       - name: Restore Firefox sccache
         id: sccache-restore
         uses: actions/cache/restore@v4
         with:
           path: .sccache
-          key: firefox-native-sandbox-sccache-aarch64-v14-${{ github.run_id }}
+          key: firefox-native-sandbox-sccache-aarch64-v15-${{ github.run_id }}
           restore-keys: |
+            firefox-native-sandbox-sccache-aarch64-v15-
             firefox-native-sandbox-sccache-aarch64-v14-
             firefox-native-sandbox-sccache-aarch64-v13-
             firefox-native-sandbox-sccache-aarch64-v12-
@@ -2208,7 +2402,7 @@ jobs:
             firefox-native-sandbox-sccache-aarch64-v7-
 
       # ============================================================
-      # 10. Prepare cache
+      # 11. Prepare cache
       # ============================================================
       - name: Prepare sccache directory
         shell: bash
@@ -2231,7 +2425,7 @@ jobs:
             .sccache || true
 
       # ============================================================
-      # 11. zram
+      # 12. zram
       # ============================================================
       - name: Enable zram
         uses: ./.github/actions/zram
@@ -2242,7 +2436,7 @@ jobs:
           device_name: /dev/zram0
 
       # ============================================================
-      # 12. Official Termux builder
+      # 13. Official Termux builder
       # ============================================================
       - name: Prepare official Termux builder
         shell: bash
@@ -2290,7 +2484,7 @@ jobs:
             'ID={{.Id}} Size={{.Size}} Created={{.Created}}'
 
       # ============================================================
-      # 13. Builder + sccache
+      # 14. Builder + sccache
       # ============================================================
       - name: Build Firefox builder with sccache
         shell: bash
@@ -2326,7 +2520,7 @@ jobs:
             'ID={{.Id}} Size={{.Size}} Created={{.Created}}'
 
       # ============================================================
-      # 14. Start builder
+      # 15. Start builder
       # ============================================================
       - name: Start Termux builder
         shell: bash
@@ -2350,7 +2544,7 @@ jobs:
             '{{range .Mounts}}{{println .Source "->" .Destination}}{{end}}'
 
       # ============================================================
-      # 15. Verify sccache
+      # 16. Verify sccache
       # ============================================================
       - name: Verify sccache
         shell: bash
@@ -2382,7 +2576,7 @@ jobs:
             '
 
       # ============================================================
-      # 16. Ubuntu runner cleanup workaround
+      # 17. Ubuntu runner cleanup workaround
       # ============================================================
       - name: Patch Termux free-space script
         shell: bash
@@ -2406,7 +2600,7 @@ jobs:
           fi
 
       # ============================================================
-      # 17. Free runner disk space
+      # 18. Free runner disk space
       # ============================================================
       - name: Free runner disk space
         shell: bash
@@ -2429,7 +2623,7 @@ jobs:
           df -h
 
       # ============================================================
-      # 18. Reset cache statistics
+      # 19. Reset cache statistics
       # ============================================================
       - name: Reset sccache statistics
         shell: bash
@@ -2444,7 +2638,7 @@ jobs:
               --zero-stats
 
       # ============================================================
-      # 19. Build Firefox
+      # 20. Build Firefox
       # ============================================================
       - name: Build Firefox
         id: build-firefox
@@ -2453,7 +2647,7 @@ jobs:
           set -o pipefail
 
           echo "======================================"
-          echo "Starting Firefox native sandbox v2.4.1"
+          echo "Starting Firefox native sandbox v2.4.3"
           echo "======================================"
 
           ./scripts/run-docker.sh \
@@ -2469,7 +2663,7 @@ jobs:
             | tee firefox-build.log
 
       # ============================================================
-      # 20. Cache statistics
+      # 21. Cache statistics
       # ============================================================
       - name: Show sccache statistics
         if: always()
@@ -2484,7 +2678,7 @@ jobs:
             || true
 
       # ============================================================
-      # 21. Diagnostics
+      # 22. Diagnostics
       # ============================================================
       - name: Build diagnostics
         if: always()
@@ -2572,7 +2766,7 @@ jobs:
           echo "======================================"
 
           grep -nEi \
-            'preflight|Utility broker|Bionic /proc|/proc/%d/stat|/proc/%d/maps|RLIMIT_STACK|getrlimit|__NR_getrlimit|syntax sanity|SocketProcessSandboxPolicy|UtilitySandboxPolicy|PrctlPolicy injection|security/sandbox|libmozsandbox|libxul|PR_PAC_RESET_KEYS|PR_GET_DUMPABLE|mremap|MREMAP_FIXED|AddSharedMemoryPaths|org\.mozilla\.ipc|system/fonts|shm_open|ShmSegmentsWriter|undefined symbol|duplicate symbol|ld\.lld: error|patch.*FAILED|Hunk.*FAILED|reject' \
+            'preflight|source-shape|Utility broker|Bionic /proc|/proc/%d/stat|/proc/%d/maps|RLIMIT_STACK|getrlimit|__NR_getrlimit|syntax sanity|SocketProcessSandboxPolicy|UtilitySandboxPolicy|PrctlPolicy injection|security/sandbox|libmozsandbox|libxul|PR_PAC_RESET_KEYS|PR_GET_DUMPABLE|mremap|MREMAP_FIXED|AddSharedMemoryPaths|org\.mozilla\.ipc|system/fonts|shm_open|ShmSegmentsWriter|undefined symbol|duplicate symbol|ld\.lld: error|patch.*FAILED|Hunk.*FAILED|reject' \
             firefox-build.log \
             2>/dev/null \
             | tail -n 900 || true
@@ -2598,17 +2792,17 @@ jobs:
             2>/dev/null || true
 
       # ============================================================
-      # 22. Save compiler cache
+      # 23. Save compiler cache
       # ============================================================
       - name: Save Firefox sccache
         if: always()
         uses: actions/cache/save@v4
         with:
           path: .sccache
-          key: firefox-native-sandbox-sccache-aarch64-v14-${{ github.run_id }}
+          key: firefox-native-sandbox-sccache-aarch64-v15-${{ github.run_id }}
 
       # ============================================================
-      # 23. Collect package
+      # 24. Collect package
       # ============================================================
       - name: Collect Firefox package
         if: success()
@@ -2665,26 +2859,26 @@ jobs:
           ls -lh artifacts/
 
       # ============================================================
-      # 24. Upload package
+      # 25. Upload package
       # ============================================================
       - name: Upload Firefox native sandbox package
         if: success()
         uses: actions/upload-artifact@v6
         with:
-          name: firefox-native-sandbox-aarch64-v2.4.1
+          name: firefox-native-sandbox-aarch64-v2.4.3
           path: artifacts/
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
 
       # ============================================================
-      # 25. Upload diagnostics
+      # 26. Upload diagnostics
       # ============================================================
       - name: Upload build diagnostics
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: firefox-native-sandbox-build-diagnostics-v2.4.1
+          name: firefox-native-sandbox-build-diagnostics-v2.4.3
           path: |
             firefox-build.log
             firefox-native-sandbox-changes.diff
