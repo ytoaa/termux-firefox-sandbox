@@ -7,6 +7,7 @@ export TERMUX_BUILDER_IMAGE_NAME
 usage() {
   cat <<'EOF'
 Usage:
+  ci.sh prepare-zram-workspace <termux-packages-dir>
   ci.sh prepare-builder <termux-packages-dir>
   ci.sh build <termux-packages-dir>
   ci.sh stats <termux-packages-dir>
@@ -29,6 +30,41 @@ run_docker() {
     cd "$d"
     ./scripts/run-docker.sh "$@"
   )
+}
+
+prepare_zram_workspace() {
+  local d workspace action key
+  d="$(realpath "$1")"
+  workspace="${GITHUB_WORKSPACE:-}"
+  if [ -z "$workspace" ]; then
+    echo "ERROR: GITHUB_WORKSPACE is not set" >&2
+    return 2
+  fi
+  workspace="$(realpath "$workspace")"
+  action="$d/.github/actions/zram/action.yml"
+  key="$d/scripts/linux-kernel-signing-keys.gpg"
+
+  test -f "$action"
+  test -f "$key"
+
+  # termux-packages' local zram action currently assumes that termux-packages
+  # itself was checked out at github.workspace.  Our workflow deliberately
+  # keeps it in a subdirectory, so expose only the two workspace-root inputs
+  # that the upstream action references.  The generated zram module/cache also
+  # lives under workspace/scripts and therefore needs no extra bridge.
+  mkdir -p "$workspace/scripts" "$workspace/.github/actions/zram"
+  cp -f "$key" "$workspace/scripts/linux-kernel-signing-keys.gpg"
+  cp -f "$action" "$workspace/.github/actions/zram/action.yml"
+
+  # Fail closed if the known upstream contract disappears.  That indicates
+  # the composite action changed and this tiny compatibility bridge should be
+  # reviewed instead of silently guessing at new paths.
+  grep -Fq '${{ github.workspace }}/scripts/linux-kernel-signing-keys.gpg' "$action"
+  grep -Fq "path: scripts/zram.ko.zst" "$action"
+
+  echo "Prepared Termux zram workspace bridge:"
+  ls -l "$workspace/scripts/linux-kernel-signing-keys.gpg" \
+        "$workspace/.github/actions/zram/action.yml"
 }
 
 prepare_builder() {
@@ -208,8 +244,8 @@ collect() {
   cp "$portrepo/port/port.toml" "$out/"
   cp "$portrepo/port/firefox_sandbox_port.py" "$out/"
   cp "$portrepo/port/prepare_recipe.py" "$out/"
-  cp "$portrepo/port/ci.sh" "$out/"
-  cp "$portrepo/port/runtime-test.sh" "$out/termux-firefox-native-sandbox-test.sh"
+  install -m 0755 "$portrepo/port/ci.sh" "$out/ci.sh"
+  install -m 0755 "$portrepo/port/runtime-test.sh" "$out/termux-firefox-native-sandbox-test.sh"
   cp "$portrepo/port/media-capabilities.html" "$out/"
   cp "$portrepo/port/DESIGN.md" "$out/"
   cp "$portrepo/port/REGRESSION.md" "$out/"
@@ -231,6 +267,7 @@ collect() {
 cmd="${1:-}"
 shift || true
 case "$cmd" in
+  prepare-zram-workspace) [ "$#" -eq 1 ] || { usage; exit 2; }; prepare_zram_workspace "$1" ;;
   prepare-builder) [ "$#" -eq 1 ] || { usage; exit 2; }; prepare_builder "$1" ;;
   build) [ "$#" -eq 1 ] || { usage; exit 2; }; build_firefox "$1" ;;
   stats) [ "$#" -eq 1 ] || { usage; exit 2; }; show_stats "$1" ;;
