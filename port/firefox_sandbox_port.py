@@ -323,6 +323,34 @@ class Port:
         else:
             self.record("Termux cubeb AudioIPC compile guard", rel, "ALREADY_PRESENT")
 
+        # audio_thread_priority's atp_set_real_time_limit is only compiled
+        # for target_os = "linux", while Termux builds the Rust side for the
+        # Android target.  The upstream call-site guard excludes Android only,
+        # so on Termux (XP_LINUX, no MOZ_WIDGET_ANDROID) the call would be
+        # compiled against a symbol the Rust crate never emits:
+        #   ld.lld: error: undefined symbol: atp_set_real_time_limit
+        # Exclude the call site on Termux; content-process RT-limit setup is
+        # unavailable under Termux RLIMITs anyway.  This removes a call, it
+        # does not widen any permission.
+        atp_guard_upstream = "#  if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)"
+        atp_guard_termux = (
+            "#  if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID) "
+            "&& !defined(__TERMUX__)"
+        )
+        if atp_guard_termux not in text:
+            if text.count(atp_guard_upstream) != 1:
+                raise PortError(
+                    "Cubeb AudioIPC: atp_set_real_time_limit call-site guard "
+                    "count is not one"
+                )
+            text = text.replace(atp_guard_upstream, atp_guard_termux, 1)
+            changed = True
+            self.record("Termux atp_set_real_time_limit call-site exclusion", rel, "APPLIED")
+        else:
+            self.record(
+                "Termux atp_set_real_time_limit call-site exclusion", rel, "ALREADY_PRESENT"
+            )
+
         if changed:
             path.write_text(text)
             self.remember_after(rel)
@@ -743,6 +771,17 @@ class Port:
         )
         if text.count(guard) != 1:
             raise PortError("Cubeb AudioIPC Termux compile guard missing or duplicated")
+        if text.count(
+            "#  if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID)\n"
+        ) != 0 or text.count(
+            "#  if defined(XP_LINUX) && !defined(MOZ_WIDGET_ANDROID) "
+            "&& !defined(__TERMUX__)\n"
+        ) != 1:
+            raise PortError(
+                "Cubeb AudioIPC: atp_set_real_time_limit call-site is not "
+                "excluded on Termux (audio_thread_priority has no Android "
+                "target build of that symbol)"
+            )
         for token in (
             "audioipc2::audioipc2_server_start(",
             "audioipc2::audioipc2_client_init(",
