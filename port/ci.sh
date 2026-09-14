@@ -179,13 +179,15 @@ verify_binary() (
   fi
   libxul="${libxuls[0]}"
 
-  mapfile -t required < <(python3 - "$cfg" <<'PYCFG'
-import sys, tomllib
-with open(sys.argv[1], 'rb') as fh:
-    cfg = tomllib.load(fh)
-for item in cfg.get('audioipc', {}).get('required_binary_strings', []):
-    print(item)
-PYCFG
+  # Extract required_binary_strings from our own port.toml without any host
+  # python3 dependency: the runner environment after the zram/builder steps
+  # has lost python3 on PATH (run #24: "python3: command not found" -> empty
+  # array -> fail-closed exit).  The layout of this file is fixed by
+  # "Validate port tools", so sed extraction is deterministic here.
+  mapfile -t required < <(
+    sed -n '/^required_binary_strings = \[/,/^\]/p' "$cfg" \
+      | sed -e '/required_binary_strings = \[/d' -e '/^\]/d' \
+            -e 's/^[[:space:]]*"//' -e 's/",\{0,1\}[[:space:]]*$//'
   )
   if [ "${#required[@]}" -eq 0 ]; then
     echo "ERROR: audioipc.required_binary_strings is empty" >&2
@@ -210,21 +212,31 @@ PYCFG
     fi
   done
 
-  python3 - "$report" "$deb" "$libxul" "$status" "${json_items[@]}" <<'PYREPORT'
-import json, os, sys
-out, deb, libxul, status, *items = sys.argv[1:]
-checks = {}
-for item in items:
-    key, value = item.rsplit('=', 1)
-    checks[key] = value
-obj = {
-    'deb': os.path.basename(deb),
-    'libxul': libxul,
-    'audioipc_binary_contract': 'pass' if status == '0' else 'fail',
-    'checks': checks,
-}
-open(out, 'w').write(json.dumps(obj, indent=2, sort_keys=True) + '\n')
-PYREPORT
+  # Write the gate report with printf (no host python3 needed).  Marker
+  # strings are plain ASCII without quotes or backslashes by the Validate
+  # port tools contract; reject anything else rather than emit broken JSON.
+  for item in "${json_items[@]}"; do
+    key="${item%=*}"
+    case "$key" in
+      *'"'*|*'\'*)
+        echo "ERROR: marker string contains JSON-unsafe character: $key" >&2
+        return 2 ;;
+    esac
+  done
+  {
+    printf '{\n'
+    printf '  "deb": "%s",\n' "$(basename "$deb")"
+    printf '  "audioipc_binary_contract": "%s",\n' "$([ "$status" -eq 0 ] && echo pass || echo fail)"
+    printf '  "checks": {\n'
+    for i in "${!json_items[@]}"; do
+      key="${json_items[i]%=*}"
+      val="${json_items[i]#*=}"
+      sep=,
+      [ "$i" -eq $(( ${#json_items[@]} - 1 )) ] && sep=
+      printf '    "%s": "%s"%s\n' "$key" "$val" "$sep"
+    done
+    printf '  }\n}\n'
+  } > "$report"
 
   if [ "$status" -ne 0 ]; then
     echo "ERROR: AudioIPC was compiled out of libxul.so" >&2
