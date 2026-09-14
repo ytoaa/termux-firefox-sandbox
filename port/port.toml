@@ -1,5 +1,6 @@
 [port]
-version = "2.4.4"
+version = "2.4.5-rc1"
+last_validated_port = "2.4.4"
 last_validated_firefox = "155.0.1"
 policy_mode = "fail-closed"
 
@@ -13,7 +14,22 @@ prefix_placeholder = "@TERMUX_PREFIX@"
 runtime_policy_scopes = ["Content", "RDD", "Socket", "Utility"]
 runtime_read_subdirs = ["lib", "etc", "share"]
 content_android_read_paths = ["/system/fonts"]
+x11_socket_subpath = "tmp/.X11-unix/X"
+
+[audioipc]
+# Termux's stock 0008-fix-macros.patch disables MOZ_CUBEB_REMOTING even though
+# the package otherwise identifies as XP_LINUX.  The sandbox port restores the
+# upstream Linux AudioIPC model; Content must not receive a direct PulseAudio
+# MAY_CONNECT bypass.
+require_termux_remoting = true
+required_binary_strings = [
+  "Starting cubeb server...",
+  "audioipc_server_start failed",
+  "SendCreateAudioIPCConnection failed: invalid FD",
+  "audioipc_server_new_client failed",
+]
 
 [regression]
 content_sandbox_level = 6
 required_media_codecs = ["h264", "vp9", "av1", "aac", "opus"]
+require_audioipc = true

@@ -57,6 +57,9 @@ jobs:
           assert cfg["compatibility"]["runtime_policy_scopes"] == [
               "Content", "RDD", "Socket", "Utility"
           ]
+          assert cfg["compatibility"]["x11_socket_subpath"] == "tmp/.X11-unix/X"
+          assert cfg["audioipc"]["require_termux_remoting"] is True
+          assert len(cfg["audioipc"]["required_binary_strings"]) >= 4
           PY
 
       - name: Prepare Firefox recipe
@@ -84,6 +87,7 @@ jobs:
           print(f"FIREFOX_VERSION={m['firefox_version']}")
           print(f"FIREFOX_CANDIDATE={candidate}")
           print(f"PORT_VERSION={m['port_version']}")
+          print(f"CANDIDATE_REASONS={','.join(m.get('candidate_reasons', []))}")
           PY
           cat /tmp/firefox-port-env >> "$GITHUB_ENV"
           candidate="$(grep '^FIREFOX_CANDIDATE=' /tmp/firefox-port-env | cut -d= -f2-)"
@@ -103,7 +107,7 @@ jobs:
         if: steps.prepare.outputs.candidate == 'true'
         shell: bash
         run: |
-          echo "::warning::Firefox ${FIREFOX_VERSION} differs from the last validated release."
+          echo "::warning::Unvalidated sandbox candidate: port=${PORT_VERSION} firefox=${FIREFOX_VERSION} reasons=${CANDIDATE_REASONS}"
           echo "The semantic port will continue, but any changed security contract fails closed."
 
       - name: Restore Firefox sccache
@@ -135,6 +139,10 @@ jobs:
         id: build-firefox
         shell: bash
         run: bash portrepo/port/ci.sh build termux-packages
+
+      - name: Verify AudioIPC binary contract
+        shell: bash
+        run: bash portrepo/port/ci.sh verify-binary termux-packages
 
       - name: Show sccache statistics
         if: always()
@@ -184,6 +192,7 @@ jobs:
             firefox-recipe-changes.diff
             termux-packages/firefox-build.log
             termux-packages/firefox-native-sandbox-port-report.json
+            termux-packages/firefox-native-sandbox-binary-gate.json
             termux-packages/firefox-native-sandbox.generated.patch
           if-no-files-found: ignore
           retention-days: 14

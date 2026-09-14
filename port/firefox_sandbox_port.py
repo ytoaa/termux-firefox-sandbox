@@ -38,6 +38,7 @@ def load_port_config() -> dict:
             "runtime_policy_scopes": ["Content", "RDD", "Socket", "Utility"],
             "runtime_read_subdirs": ["lib", "etc", "share"],
             "content_android_read_paths": ["/system/fonts"],
+            "x11_socket_subpath": "tmp/.X11-unix/X",
         },
     }
 
@@ -51,6 +52,9 @@ SANDBOX = Path("security/sandbox/linux/Sandbox.cpp")
 REPORTER = Path("security/sandbox/linux/reporter/SandboxReporterCommon.h")
 LOCK = Path("security/sandbox/chromium/base/synchronization/lock_impl_posix.cc")
 SHMEM = Path("ipc/glue/SharedMemoryPlatform_posix.cpp")
+CUBEB = Path("dom/media/CubebUtils.cpp")
+GKRUST_FEATURES = Path("toolkit/library/rust/gkrust-features.mozbuild")
+RUST_SHARED_CARGO = Path("toolkit/library/rust/shared/Cargo.toml")
 
 
 class PortError(RuntimeError):
@@ -75,6 +79,7 @@ class Port:
         self.runtime_policy_scopes = list(compat["runtime_policy_scopes"])
         self.runtime_read_subdirs = list(compat["runtime_read_subdirs"])
         self.content_android_read_paths = list(compat["content_android_read_paths"])
+        self.x11_socket_subpath = str(compat.get("x11_socket_subpath", "tmp/.X11-unix/X")).lstrip("/")
         self.changes: list[Change] = []
         self.before_sha: dict[str, str] = {}
         self.after_sha: dict[str, str] = {}
@@ -260,6 +265,69 @@ class Port:
         self.record("skip glibc shm lazy init on Bionic", SANDBOX, "APPLIED")
 
     # ------------------------------------------------------------------
+    # Cubeb / AudioIPC adaptation
+    # ------------------------------------------------------------------
+    def patch_cubeb_remoting(self) -> None:
+        """Restore upstream Linux AudioIPC semantics for Termux desktop Firefox.
+
+        The Termux package currently patches CubebUtils.cpp to explicitly
+        compile MOZ_CUBEB_REMOTING out on __TERMUX__.  That is harmless while
+        the content sandbox is disabled, but at level >= 4 it makes Content
+        connect directly to PulseAudio, which the Linux sandbox intentionally
+        blocks.  Restore the upstream XP_LINUX branch instead of granting a
+        direct PulseAudio socket exception to Content.
+        """
+        rel = CUBEB
+        path = self.p(rel)
+        self.remember_before(rel)
+        text = path.read_text()
+        changed = False
+
+        upstream = (
+            "#if defined(XP_LINUX) || defined(XP_MACOSX) || defined(XP_WIN)\n"
+            "#  define MOZ_CUBEB_REMOTING\n"
+            "#endif"
+        )
+        termux_disabled = (
+            "#if (defined(XP_LINUX) && !defined(__TERMUX__)) || "
+            "defined(XP_MACOSX) || defined(XP_WIN)\n"
+            "#  define MOZ_CUBEB_REMOTING\n"
+            "#endif"
+        )
+        if upstream not in text:
+            if text.count(termux_disabled) != 1:
+                raise PortError(
+                    "Cubeb AudioIPC: neither the known Termux exclusion nor "
+                    "the upstream Linux remoting condition was found"
+                )
+            text = text.replace(termux_disabled, upstream, 1)
+            changed = True
+            self.record("restore Termux cubeb AudioIPC remoting", rel, "APPLIED")
+        else:
+            if termux_disabled in text:
+                raise PortError("Cubeb AudioIPC: upstream and Termux-disabled forms both present")
+            self.record("restore Termux cubeb AudioIPC remoting", rel, "ALREADY_PRESENT")
+
+        guard = (
+            "\n\n#if defined(__TERMUX__) && defined(XP_LINUX) && \\\n"
+            "    !defined(MOZ_CUBEB_REMOTING)\n"
+            "#  error \"Termux desktop Firefox requires cubeb AudioIPC remoting\"\n"
+            "#endif"
+        )
+        if guard not in text:
+            if text.count(upstream) != 1:
+                raise PortError("Cubeb AudioIPC: upstream remoting block count is not one")
+            text = text.replace(upstream, upstream + guard, 1)
+            changed = True
+            self.record("Termux cubeb AudioIPC compile guard", rel, "APPLIED")
+        else:
+            self.record("Termux cubeb AudioIPC compile guard", rel, "ALREADY_PRESENT")
+
+        if changed:
+            path.write_text(text)
+            self.remember_after(rel)
+
+    # ------------------------------------------------------------------
     # Broker policy adaptations
     # ------------------------------------------------------------------
     def patch_broker(self) -> None:
@@ -268,6 +336,50 @@ class Port:
         self.remember_before(rel)
         text = path.read_text()
         changed = False
+
+        # Keep the X11 broker endpoint in one place.  Upstream desktop Linux
+        # uses /tmp/.X11-unix/X, while Termux:X11 places the same socket under
+        # $PREFIX/tmp.  This is a path translation only; it does not widen the
+        # MAY_CONNECT permission or add a PulseAudio bypass.
+        x11_const = (
+            "#if defined(__TERMUX__)\n"
+            "static constexpr const char* kX11SocketPrefix =\n"
+            f'    "{self.prefix}/{self.x11_socket_subpath}";\n'
+            "#else\n"
+            'static constexpr const char* kX11SocketPrefix = "/tmp/.X11-unix/X";\n'
+            "#endif\n"
+        )
+        if "static constexpr const char* kX11SocketPrefix" not in text:
+            x11_anchor = "static const int deny = SandboxBroker::FORCE_DENY;\n"
+            if text.count(x11_anchor) != 1:
+                raise PortError("X11 socket prefix: broker constant anchor changed")
+            text = text.replace(x11_anchor, x11_anchor + x11_const, 1)
+            changed = True
+            self.record("central Termux X11 socket prefix", rel, "APPLIED")
+        else:
+            if x11_const not in text:
+                raise PortError("X11 socket prefix helper exists but does not match the Termux contract")
+            self.record("central Termux X11 socket prefix", rel, "ALREADY_PRESENT")
+
+        direct_x11 = 'policy->AddPrefix(SandboxBroker::MAY_CONNECT, "/tmp/.X11-unix/X");'
+        central_x11 = "policy->AddPrefix(SandboxBroker::MAY_CONNECT, kX11SocketPrefix);"
+        for scope_needle, label in (
+            ("static void AddX11Dependencies", "AddX11Dependencies"),
+            ("SandboxBrokerPolicyFactory::GetRDDPolicy(int aPid)", "RDD X11 fallback"),
+        ):
+            xstart, xend = self.scope_bounds(text, scope_needle, label)
+            scope = text[xstart:xend]
+            if central_x11 in scope:
+                if direct_x11 in scope:
+                    raise PortError(f"{label}: both direct and centralized X11 socket rules are present")
+                self.record(f"{label} uses central X11 socket prefix", rel, "ALREADY_PRESENT")
+                continue
+            if scope.count(direct_x11) != 1:
+                raise PortError(f"{label}: expected exactly one upstream X11 MAY_CONNECT rule")
+            scope = scope.replace(direct_x11, central_x11, 1)
+            text = text[:xstart] + scope + text[xend:]
+            changed = True
+            self.record(f"{label} uses central X11 socket prefix", rel, "APPLIED")
 
         # POSIX shm lives in $PREFIX/tmp in the Termux Firefox package.
         termux_shm = f'#if defined(__TERMUX__)\n  std::string shmPath("{self.prefix}/tmp");\n#else\n  std::string shmPath("/dev/shm");\n#endif'
@@ -595,6 +707,7 @@ class Port:
         self.patch_reporter()
         self.patch_priority_inheritance()
         self.patch_glibc_lazy_init()
+        self.patch_cubeb_remoting()
         self.patch_broker()
         self.patch_filter()
         self.verify()
@@ -611,8 +724,95 @@ class Port:
         elif actual != count:
             raise PortError(f"verify {label}: expected count {count}, got {actual}: {token!r}")
 
+    def verify_cubeb_remoting(self) -> None:
+        text = self.p(CUBEB).read_text()
+        upstream = (
+            "#if defined(XP_LINUX) || defined(XP_MACOSX) || defined(XP_WIN)\n"
+            "#  define MOZ_CUBEB_REMOTING\n"
+            "#endif"
+        )
+        if text.count(upstream) != 1:
+            raise PortError("Cubeb AudioIPC upstream Linux remoting block missing or duplicated")
+        if "defined(XP_LINUX) && !defined(__TERMUX__)" in text:
+            raise PortError("Cubeb AudioIPC is still explicitly disabled on Termux")
+        guard = (
+            "#if defined(__TERMUX__) && defined(XP_LINUX) && \\\n"
+            "    !defined(MOZ_CUBEB_REMOTING)\n"
+            "#  error \"Termux desktop Firefox requires cubeb AudioIPC remoting\"\n"
+            "#endif"
+        )
+        if text.count(guard) != 1:
+            raise PortError("Cubeb AudioIPC Termux compile guard missing or duplicated")
+        for token in (
+            "audioipc2::audioipc2_server_start(",
+            "audioipc2::audioipc2_client_init(",
+            "SendCreateAudioIPCConnection()",
+        ):
+            if token not in text:
+                raise PortError(f"Cubeb AudioIPC source contract changed: missing {token}")
+
+    def verify_cubeb_rust_feature(self) -> None:
+        """Fail early if Firefox no longer wires Linux gkrust to audioipc2."""
+        features = self.p(GKRUST_FEATURES).read_text()
+        feature_line = 'gkrust_features += ["cubeb-remoting"]'
+        if features.count(feature_line) != 1:
+            raise PortError("gkrust cubeb-remoting feature line missing or duplicated")
+        idx = features.index(feature_line)
+        block_start = features.rfind("if ", 0, idx)
+        if block_start < 0:
+            raise PortError("gkrust cubeb-remoting conditional could not be located")
+        condition = features[block_start:idx]
+        if 'CONFIG["OS_ARCH"] == "Linux"' not in condition:
+            raise PortError(
+                "gkrust cubeb-remoting is no longer enabled for OS_ARCH Linux; "
+                "manual AudioIPC review required"
+            )
+
+        cargo = self.p(RUST_SHARED_CARGO).read_text()
+        m = re.search(r'^cubeb-remoting\s*=\s*\[(.*?)\]\s*$', cargo, re.MULTILINE)
+        if not m:
+            raise PortError("gkrust shared Cargo.toml cubeb-remoting feature missing")
+        mapping = m.group(1)
+        for dep in ('"audioipc2-client"', '"audioipc2-server"'):
+            if dep not in mapping:
+                raise PortError(f"cubeb-remoting feature no longer includes {dep}")
+
     def verify_broker(self) -> None:
         text = self.p(BROKER).read_text()
+
+        x11_const = (
+            "#if defined(__TERMUX__)\n"
+            "static constexpr const char* kX11SocketPrefix =\n"
+            f'    "{self.prefix}/{self.x11_socket_subpath}";\n'
+            "#else\n"
+            'static constexpr const char* kX11SocketPrefix = "/tmp/.X11-unix/X";\n'
+            "#endif\n"
+        )
+        if text.count(x11_const) != 1:
+            raise PortError("central X11 socket prefix is missing or duplicated")
+        if text.count('"/tmp/.X11-unix/X"') != 1:
+            raise PortError("direct Linux X11 socket literal remains outside the central prefix")
+        central_x11 = "policy->AddPrefix(SandboxBroker::MAY_CONNECT, kX11SocketPrefix);"
+        for scope_needle, label in (
+            ("static void AddX11Dependencies", "AddX11Dependencies"),
+            ("SandboxBrokerPolicyFactory::GetRDDPolicy(int aPid)", "RDD X11 fallback"),
+        ):
+            s, e = self.scope_bounds(text, scope_needle, f"verify {label}")
+            if text[s:e].count(central_x11) != 1:
+                raise PortError(f"{label}: centralized X11 MAY_CONNECT rule missing or duplicated")
+
+        # Guard against accidentally translating the old low-level Pulse rule
+        # into a broad $PREFIX/tmp grant.  The validated POSIX-shm helper may
+        # name $PREFIX/tmp as a base string, but no broker policy may grant the
+        # whole directory read/write/create directly.
+        for bad in (
+            f'AddTree(rdwrcr, "{self.prefix}/tmp',
+            f'AddPrefix(rdwrcr, "{self.prefix}/tmp',
+            f'AddFutureDir(rdwrcr, "{self.prefix}/tmp',
+        ):
+            if bad in text:
+                raise PortError(f"broad Termux tmp rdwrcr policy detected: {bad}")
+
         helper_start, helper_end = self.scope_bounds(text, "static void AddTermuxRuntimeReadPaths", "runtime helper")
         helper = text[helper_start:helper_end]
         for leaf in self.runtime_read_subdirs:
@@ -642,6 +842,8 @@ class Port:
                 raise PortError(f"{label}: Termux runtime helper call count != 1")
         cs, ce = self.scope_bounds(text, targets[0][0], "verify Content")
         content = text[cs:ce]
+        if "pulse/native" in content or "PULSE_SERVER" in content:
+            raise PortError("Content policy contains a direct PulseAudio socket bypass")
         for android_path in self.content_android_read_paths:
             token = f'policy->AddTree(rdonly, "{android_path}");'
             if content.count(token) != 1:
@@ -694,6 +896,11 @@ class Port:
         if utility.count(rule) != 1:
             raise PortError("Utility fstatfs Termux-only rule missing or duplicated")
 
+        gs, ge = self.scope_bounds(text, "class GMPSandboxPolicy", "verify GMPSandboxPolicy")
+        gmp = text[gs:ge]
+        if "AddTermuxRuntimeReadPaths" in gmp or f'"{self.prefix}/lib"' in gmp:
+            raise PortError("GMP sandbox must not inherit broad Termux runtime-library access")
+
         for class_name in ("SandboxPolicyCommon", "SocketProcessSandboxPolicy", "UtilitySandboxPolicy"):
             s, e = self.scope_bounds(text, f"class {class_name}", f"verify {class_name}")
             scope = text[s:e]
@@ -739,6 +946,8 @@ class Port:
         self.require(REPORTER, "#include <time.h>", "sandbox reporter")
         self.require(LOCK, "BUILDFLAG(IS_FUCHSIA) || defined(__TERMUX__)", "PI mutex")
         self.require(SANDBOX, "#if !defined(__TERMUX__)\nstatic void RunGlibcLazyInitializers()", "glibc lazy init")
+        self.verify_cubeb_remoting()
+        self.verify_cubeb_rust_feature()
         self.verify_broker()
         self.verify_filter()
         self.verify_upstream_policy_parity()
@@ -766,7 +975,7 @@ class Port:
         path.write_text("".join(chunks))
 
     def report(self, command: str) -> dict:
-        for rel in (FILTER, BROKER, SANDBOX, REPORTER, LOCK, SHMEM):
+        for rel in (FILTER, BROKER, SANDBOX, REPORTER, LOCK, SHMEM, CUBEB, GKRUST_FEATURES, RUST_SHARED_CARGO):
             path = self.p(rel)
             self.after_sha.setdefault(str(rel), self.sha(path))
         return {

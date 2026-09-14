@@ -140,6 +140,7 @@ def main() -> int:
     here = Path(__file__).resolve().parent
     cfg = tomllib.loads((here / "port.toml").read_text())
     port_version = cfg["port"]["version"]
+    last_validated_port = cfg["port"].get("last_validated_port", port_version)
     last_validated = cfg["port"]["last_validated_firefox"]
 
     firefox_dir = args.firefox_dir.resolve()
@@ -168,12 +169,19 @@ def main() -> int:
     shutil.copy2(here / "firefox_sandbox_port.py", firefox_dir / "termux-native-sandbox-port.py")
     shutil.copy2(here / "port.toml", firefox_dir / "termux-native-sandbox-port.toml")
 
-    candidate = version != last_validated
+    candidate_reasons = []
+    if version != last_validated:
+        candidate_reasons.append("firefox-version")
+    if port_version != last_validated_port:
+        candidate_reasons.append("port-version")
+    candidate = bool(candidate_reasons)
     metadata = {
         "port_version": port_version,
+        "last_validated_port": last_validated_port,
         "firefox_version": version,
         "last_validated_firefox": last_validated,
         "candidate": candidate,
+        "candidate_reasons": candidate_reasons,
         "original_revision": original_revision,
         "custom_revision": custom_revision,
         "termux_source_url_template": read_scalar(original, "TERMUX_PKG_SRCURL"),

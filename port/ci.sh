@@ -10,6 +10,7 @@ Usage:
   ci.sh prepare-zram-workspace <termux-packages-dir>
   ci.sh prepare-builder <termux-packages-dir>
   ci.sh build <termux-packages-dir>
+  ci.sh verify-binary <termux-packages-dir>
   ci.sh stats <termux-packages-dir>
   ci.sh diagnostics <termux-packages-dir>
   ci.sh collect <termux-packages-dir> <portrepo-dir> <metadata.json> <recipe.diff> <artifacts-dir>
@@ -154,6 +155,83 @@ build_firefox() {
   )
 }
 
+verify_binary() (
+  local d cfg deb tmp libxul report
+  d="$(need_termux_dir "$1")"
+  cfg="$d/x11-packages/firefox/termux-native-sandbox-port.toml"
+  report="$d/firefox-native-sandbox-binary-gate.json"
+
+  test -f "$cfg"
+  deb="$(find "$d/output" -type f -name 'firefox_*.deb' -print -quit)"
+  if [ -z "$deb" ]; then
+    echo "ERROR: Firefox deb not found for binary gate" >&2
+    return 2
+  fi
+
+  tmp="$(mktemp -d)"
+  trap 'rm -rf "$tmp"' EXIT
+  dpkg-deb -x "$deb" "$tmp"
+  mapfile -t libxuls < <(find "$tmp" -type f -path '*/lib/firefox/libxul.so' -print)
+  if [ "${#libxuls[@]}" -ne 1 ]; then
+    echo "ERROR: expected exactly one libxul.so, found ${#libxuls[@]}" >&2
+    printf '%s\n' "${libxuls[@]}" >&2
+    return 2
+  fi
+  libxul="${libxuls[0]}"
+
+  mapfile -t required < <(python3 - "$cfg" <<'PYCFG'
+import sys, tomllib
+with open(sys.argv[1], 'rb') as fh:
+    cfg = tomllib.load(fh)
+for item in cfg.get('audioipc', {}).get('required_binary_strings', []):
+    print(item)
+PYCFG
+  )
+  if [ "${#required[@]}" -eq 0 ]; then
+    echo "ERROR: audioipc.required_binary_strings is empty" >&2
+    return 2
+  fi
+
+  status=0
+  json_items=()
+  echo "======================================"
+  echo "AudioIPC binary contract"
+  echo "======================================"
+  echo "deb    : $deb"
+  echo "libxul : $libxul"
+  for needle in "${required[@]}"; do
+    if grep -aFq -- "$needle" "$libxul"; then
+      printf 'PRESENT  %s\n' "$needle"
+      json_items+=("$needle=present")
+    else
+      printf 'ABSENT   %s\n' "$needle" >&2
+      json_items+=("$needle=absent")
+      status=1
+    fi
+  done
+
+  python3 - "$report" "$deb" "$libxul" "$status" "${json_items[@]}" <<'PYREPORT'
+import json, os, sys
+out, deb, libxul, status, *items = sys.argv[1:]
+checks = {}
+for item in items:
+    key, value = item.rsplit('=', 1)
+    checks[key] = value
+obj = {
+    'deb': os.path.basename(deb),
+    'libxul': libxul,
+    'audioipc_binary_contract': 'pass' if status == '0' else 'fail',
+    'checks': checks,
+}
+open(out, 'w').write(json.dumps(obj, indent=2, sort_keys=True) + '\n')
+PYREPORT
+
+  if [ "$status" -ne 0 ]; then
+    echo "ERROR: AudioIPC was compiled out of libxul.so" >&2
+    return 2
+  fi
+)
+
 show_stats() {
   local d
   d="$(need_termux_dir "$1")"
@@ -184,6 +262,12 @@ diagnostics() {
   echo "Semantic port report"
   echo "======================================"
   cat "$d/firefox-native-sandbox-port-report.json" 2>/dev/null || true
+
+  echo
+  echo "======================================"
+  echo "AudioIPC binary gate"
+  echo "======================================"
+  cat "$d/firefox-native-sandbox-binary-gate.json" 2>/dev/null || true
 
   echo
   echo "======================================"
@@ -218,7 +302,7 @@ diagnostics() {
   echo "Focused build diagnostics"
   echo "======================================"
   grep -nEi \
-    'PORT ERROR|RECIPE ERROR|semantic port|VERIFY SUCCESS|sandbox|seccomp|PR_PAC|PR_GET_DUMPABLE|RLIMIT_STACK|getrlimit|fstatfs|MREMAP_FIXED|AddTermuxRuntimeReadPaths|libavcodec|FFmpeg|PDM|Utility|undefined symbol|duplicate symbol|ld\.lld: error|Hunk.*FAILED|reject' \
+    'PORT ERROR|RECIPE ERROR|semantic port|VERIFY SUCCESS|sandbox|seccomp|PR_PAC|PR_GET_DUMPABLE|RLIMIT_STACK|getrlimit|fstatfs|MREMAP_FIXED|AddTermuxRuntimeReadPaths|kX11SocketPrefix|MOZ_CUBEB_REMOTING|AudioIPC|audioipc|cubeb|libpulse|libavcodec|FFmpeg|PDM|Utility|undefined symbol|duplicate symbol|ld\.lld: error|Hunk.*FAILED|reject' \
     "$d/firefox-build.log" 2>/dev/null | tail -n 1200 || true
 
   find "$d/output" -type f -name 'firefox_*.deb' -print 2>/dev/null || true
@@ -252,6 +336,8 @@ collect() {
 
   [ -f "$d/firefox-native-sandbox-port-report.json" ] \
     && cp "$d/firefox-native-sandbox-port-report.json" "$out/"
+  [ -f "$d/firefox-native-sandbox-binary-gate.json" ] \
+    && cp "$d/firefox-native-sandbox-binary-gate.json" "$out/"
   [ -f "$d/firefox-native-sandbox.generated.patch" ] \
     && cp "$d/firefox-native-sandbox.generated.patch" "$out/"
 
@@ -270,6 +356,7 @@ case "$cmd" in
   prepare-zram-workspace) [ "$#" -eq 1 ] || { usage; exit 2; }; prepare_zram_workspace "$1" ;;
   prepare-builder) [ "$#" -eq 1 ] || { usage; exit 2; }; prepare_builder "$1" ;;
   build) [ "$#" -eq 1 ] || { usage; exit 2; }; build_firefox "$1" ;;
+  verify-binary) [ "$#" -eq 1 ] || { usage; exit 2; }; verify_binary "$1" ;;
   stats) [ "$#" -eq 1 ] || { usage; exit 2; }; show_stats "$1" ;;
   diagnostics) [ "$#" -eq 1 ] || { usage; exit 2; }; diagnostics "$1" ;;
   collect) [ "$#" -eq 5 ] || { usage; exit 2; }; collect "$@" ;;

@@ -5,6 +5,31 @@ LEVEL="${FIREFOX_SANDBOX_LEVEL:-6}"
 PROFILE="${FIREFOX_SANDBOX_PROFILE:-$HOME/.mozilla/firefox-termux-sandbox-test}"
 LOG="${FIREFOX_SANDBOX_LOG:-$HOME/firefox-native-sandbox-runtime.log}"
 START_URL="${FIREFOX_SANDBOX_URL:-about:blank}"
+SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# When port.toml is shipped next to this helper, verify that the installed
+# libxul still contains the AudioIPC implementation before starting a runtime
+# test. This catches accidental MOZ_CUBEB_REMOTING compile-out immediately.
+PORT_CONFIG="${FIREFOX_SANDBOX_PORT_CONFIG:-$SELF_DIR/port.toml}"
+LIBXUL="$(dpkg -L firefox 2>/dev/null | grep '/libxul\.so$' | head -n1 || true)"
+if [ -f "$PORT_CONFIG" ] && [ -n "$LIBXUL" ] && [ -f "$LIBXUL" ]; then
+  mapfile -t AUDIOIPC_STRINGS < <(python3 - "$PORT_CONFIG" <<'PYCFG'
+import sys, tomllib
+with open(sys.argv[1], 'rb') as fh:
+    cfg = tomllib.load(fh)
+for item in cfg.get('audioipc', {}).get('required_binary_strings', []):
+    print(item)
+PYCFG
+  )
+  for needle in "${AUDIOIPC_STRINGS[@]}"; do
+    if grep -aFq -- "$needle" "$LIBXUL"; then
+      echo "AudioIPC binary: PRESENT  $needle"
+    else
+      echo "AudioIPC binary: ABSENT   $needle" >&2
+      exit 2
+    fi
+  done
+fi
 
 mkdir -p "$PROFILE"
 cat > "$PROFILE/user.js" <<EOF
@@ -35,6 +60,8 @@ echo "level       : $LEVEL"
 echo "profile     : $PROFILE"
 echo "log         : $LOG"
 echo "url         : $START_URL"
+echo "port config : $PORT_CONFIG"
+echo "libxul      : ${LIBXUL:-unknown}"
 echo "socket off  : ${FIREFOX_SANDBOX_DISABLE_SOCKET:-0}"
 echo "utility off : ${FIREFOX_SANDBOX_DISABLE_UTILITY:-0}"
 echo "RDD off     : ${FIREFOX_SANDBOX_DISABLE_RDD:-0}"
@@ -60,7 +87,7 @@ echo "======================================"
 echo "Sandbox-focused runtime log"
 echo "======================================"
 grep -nEi \
-  'sandbox|seccomp|sigsys|violation|syscall|rejected|bad system call|channel error|MOZ_CRASH|PR_PAC|PR_GET_DUMPABLE|getrlimit|RLIMIT_STACK|fstatfs|mremap|/proc/self/|/proc/[0-9]+/|libavcodec|libavutil|FFmpeg|PDM|decoder|logdw|timezone|tzdata|__properties__|org\.mozilla\.ipc|system/fonts' \
+  'sandbox|seccomp|sigsys|violation|syscall|rejected|bad system call|channel error|MOZ_CRASH|PR_PAC|PR_GET_DUMPABLE|getrlimit|RLIMIT_STACK|fstatfs|mremap|/proc/self/|/proc/[0-9]+/|AudioIPC|audioipc|cubeb|libpulse|pulse/native|X11-unix|kX11SocketPrefix|libavcodec|libavutil|FFmpeg|PDM|decoder|logdw|timezone|tzdata|__properties__|org\.mozilla\.ipc|system/fonts' \
   "$LOG" | tail -n 1200 || true
 
 echo
