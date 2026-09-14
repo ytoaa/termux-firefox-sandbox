@@ -1,4 +1,4 @@
-# v2.4.5-rc1 — Action r3 candidate
+# v2.4.5 — Action r3 (validated)
 
 This tree is based on the device-validated v2.4.4/r2 Action and adds only the
 next isolated compatibility delta.
@@ -28,13 +28,20 @@ next isolated compatibility delta.
 
 ## Validation state
 
-v2.4.4/r2 is the validated baseline on Firefox 155.0.1. This r3 tree is
-`2.4.5-rc1` and is intentionally marked an unvalidated candidate until:
+All four gates passed on 2026-09-14 (run #25 + device):
 
-1. GitHub Actions build succeeds;
-2. the binary AudioIPC gate passes;
-3. the device level-6 regression passes with a live PulseAudio daemon;
-4. the level-4 X11 diagnostic passes.
+1. GitHub Actions build succeeds (run #25, head dde080f);
+2. the binary AudioIPC gate passes (4/4 markers PRESENT, independently
+   re-verified from the released deb);
+3. the device level-6 regression passes with a live PulseAudio daemon,
+   including AudioIPC cubeb-server output for AAC and YouTube with audible
+   playback confirmed by the user;
+4. the level-4 X11 diagnostic passes (broker CONNECT policy for
+   $PREFIX/tmp/.X11-unix/X, no denial).
+
+Post-rc1 fixes folded in: exclude the `atp_set_real_time_limit` call-site on
+Termux (audio_thread_priority builds that symbol for target_os=linux only),
+and the binary gate no longer depends on runner host python3.
 
 ## Apply
 

@@ -1,4 +1,4 @@
-# Device regression gate — v2.4.5-rc1 / action r3
+# Device regression gate — v2.4.5 / action r3
 
 This candidate changes two security-relevant paths relative to validated
 v2.4.4: cubeb AudioIPC is restored, and the X11 socket prefix is translated to
