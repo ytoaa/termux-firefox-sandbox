@@ -131,6 +131,52 @@ def bump_revision_once(text: str) -> tuple[str, int]:
     return text[: v.end()] + insertion + text[v.end() :], revision
 
 
+# Debian-ordered package version lead over the Termux channel package.
+#
+# Motivation: with equal versions, `pkg upgrade firefox` on a device that has
+# our sandbox deb installed can silently replace it with Termux's official
+# sandbox-off build whenever Termux bumps its version.  Publishing our deb at
+# <major>.1 keeps our installation strictly newer than every release of the
+# same major series, so only an explicit port rebuild ever changes the
+# installed browser.
+#
+# Safety (verified 2026-09-16 against archive.mozilla.org release history):
+# Firefox >= 100 has never shipped a second segment != 0 (167 rapid releases,
+# all N.0[.k]); dot releases stay in the third segment (up to N.0.6).  A
+# <major>.1 lead therefore never collides with a real Firefox release and
+# outranks every same-series dot bump Termux may publish.  On a new major,
+# the upstream gate rebuilds and the lead moves to the next <major>.1.
+PACKAGED_MINOR_LEAD = "1"
+
+
+def packaged_version(source_version: str) -> str:
+    major = source_version.split(".")[0]
+    if not major.isdigit():
+        raise RecipeError(f"cannot derive packaged version from {source_version!r}")
+    return f"{major}.{PACKAGED_MINOR_LEAD}"
+
+
+def raise_package_version(text: str, source_version: str) -> str:
+    """Pin the source URL to the real version, then publish at <major>.1."""
+    target = packaged_version(source_version)
+    old_line = re.search(r'^TERMUX_PKG_VERSION=(?:"([^"]*)"|([^\s#]+))\s*$', text, re.MULTILINE)
+    if not old_line:
+        raise RecipeError("TERMUX_PKG_VERSION line not found for version lead")
+    current = old_line.group(1) or old_line.group(2)
+    if current == target:
+        return text  # idempotent
+    # The Termux SRCURL interpolates ${TERMUX_PKG_VERSION#*really}; materialize
+    # it against the real source version BEFORE raising the published version.
+    def materialize(m: re.Match) -> str:
+        return m.group(0).replace("${TERMUX_PKG_VERSION#*really}", source_version)
+
+    text = re.sub(r'^TERMUX_PKG_SRCURL=.*$', materialize, text, count=1, flags=re.MULTILINE)
+    if source_version not in text:
+        raise RecipeError("SRCURL did not materialize to the real source version")
+    text = text[: old_line.start()] + f'TERMUX_PKG_VERSION="{target}"' + text[old_line.end():]
+    return text
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--firefox-dir", type=Path, required=True)
@@ -153,6 +199,15 @@ def main() -> int:
     version = read_scalar(original, "TERMUX_PKG_VERSION")
     if not version:
         raise RecipeError("could not parse TERMUX_PKG_VERSION")
+    # On re-runs over an already-prepared recipe, the published VERSION is the
+    # <major>.1 lead.  Firefox >= 100 never releases N.1 (verified against the
+    # full archive), so this form is unambiguous: recover the true source
+    # version from the materialized SRCURL instead of misreading the lead.
+    if REV_MARK in original and re.fullmatch(r"\d+\.1", version):
+        m = re.search(r"/releases/([^/]+)/source/", read_scalar(original, "TERMUX_PKG_SRCURL") or "")
+        if not m:
+            raise RecipeError("prepared recipe lacks a materialized source URL to recover the true version")
+        version = m.group(1)
     original_revision = int(read_scalar(original, "TERMUX_PKG_REVISION") or "0")
 
     ensure_mozconfig(mozconfig)
@@ -162,6 +217,9 @@ def main() -> int:
     text = ensure_linker_flag(text)
     text = ensure_preconfigure_hook(text)
     text, custom_revision = bump_revision_once(text)
+    # Publish at <major>.1 so our deb strictly outranks Termux channel builds
+    # of the same series (see PACKAGED_MINOR_LEAD rationale above).
+    text = raise_package_version(text, version)
     build.write_text(text)
 
     # The Termux builder mounts termux-packages, not this port repository, so
@@ -179,6 +237,7 @@ def main() -> int:
         "port_version": port_version,
         "last_validated_port": last_validated_port,
         "firefox_version": version,
+        "packaged_version": packaged_version(version),
         "last_validated_firefox": last_validated,
         "candidate": candidate,
         "candidate_reasons": candidate_reasons,
@@ -204,6 +263,12 @@ def main() -> int:
     ):
         if token not in final_build:
             raise RecipeError(f"recipe verification missing {token!r}")
+    # Version lead contract: published version at <major>.1, source URL pinned
+    # to the real source version (no unexpanded template referencing VERSION).
+    if read_scalar(final_build, "TERMUX_PKG_VERSION") != packaged_version(version):
+        raise RecipeError("package version lead not applied")
+    if "${TERMUX_PKG_VERSION" in (read_scalar(final_build, "TERMUX_PKG_SRCURL") or ""):
+        raise RecipeError("SRCURL still interpolates TERMUX_PKG_VERSION after materialization")
     for token in (
         "ac_add_options --enable-sandbox",
         "ac_add_options --disable-forkserver",

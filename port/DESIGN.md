@@ -136,3 +136,36 @@ The verifier scans for previously unknown `Get*Policy` broker functions that
 carry Linux runtime-library paths. It never grants Termux runtime paths to a new
 process type automatically. A new security boundary stops the candidate for
 manual review.
+
+## Package version lead
+
+The published deb version is deliberately **`<major>.1`** while the real
+Firefox source is `major.0.x` (Termux channel version).  This keeps a device
+that has our sandbox build installed strictly ahead of every Termux package of
+the same series in dpkg ordering, so `pkg upgrade firefox` can never silently
+replace the sandboxed browser with the official sandbox-off build when
+Termux publishes a version or dot bump.  Prepared by `prepare_recipe.py`:
+the `${TERMUX_PKG_VERSION#*really}`-interpolating SRCURL is materialized to
+the real source version first, then `TERMUX_PKG_VERSION` is raised to
+`<major>.1` and `TERMUX_PKG_REVISION` bumped.
+
+Safety of the `N.1` space: verified 2026-09-16 against the full
+archive.mozilla.org release listing — Firefox >= 100 has never shipped a
+second segment != 0 (167 releases, all `N.0[.k]`, dots only in segment 3,
+observed up to `N.0.6`).  A re-run over an already-prepared recipe recovers
+the true source version from the materialized SRCURL.
+
+Consequences accepted by this policy:
+
+- The upstream gate rebuilds only on minor (0.1-level) moves; same-version
+  revision/source-hash drift is reported without scheduling a build because
+  the version lead already protects installs through it.  Firefox dot
+  releases carry security fixes, so adopting them waits for the next minor
+  rebuild unless a human dispatches the workflow with `force=true`.
+- Between a Termux major bump (e.g. 157.0) and our first 157 build, Termux's
+  new major temporarily outranks our stale `156.1` lead.  The weekly gate /
+  manual dispatch closes this window; `apt-mark hold firefox` removes it
+  entirely for users who prefer no automatic replacement at all.
+- Package managers and `about:support` show different numbers on purpose:
+  deb version `156.1` (packaging) vs Firefox 156.0 (actual source).
+  Metadata records both as `packaged_version` and `firefox_version`.
