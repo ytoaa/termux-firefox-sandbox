@@ -26,21 +26,47 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Callable
 
+class PortError(RuntimeError):
+    pass
+
+
+REQUIRED_COMPAT_KEYS = (
+    "runtime_policy_scopes",
+    "runtime_read_subdirs",
+    "content_android_read_paths",
+    "x11_socket_subpath",
+)
+
+
 def load_port_config() -> dict:
+    """Load the port config; fail closed if it is absent or incomplete.
+
+    An implicit fallback would silently run with stale compatibility values
+    whenever the toml copy goes missing, so no defaults are baked in here.
+    """
     here = Path(__file__).resolve().parent
     for name in ("port.toml", "termux-native-sandbox-port.toml"):
         cfg = here / name
         if cfg.is_file():
-            return tomllib.loads(cfg.read_text())
-    return {
-        "port": {"version": "unknown"},
-        "compatibility": {
-            "runtime_policy_scopes": ["Content", "RDD", "Socket", "Utility"],
-            "runtime_read_subdirs": ["lib", "etc", "share"],
-            "content_android_read_paths": ["/system/fonts"],
-            "x11_socket_subpath": "tmp/.X11-unix/X",
-        },
-    }
+            try:
+                data = tomllib.loads(cfg.read_text())
+            except tomllib.TOMLDecodeError as exc:
+                raise PortError(f"port config {name} is not valid TOML: {exc}") from None
+            if "version" not in data.get("port", {}):
+                raise PortError(f"port config {name} is missing [port].version")
+            compat = data.get("compatibility", {})
+            missing = [k for k in REQUIRED_COMPAT_KEYS if k not in compat]
+            if missing:
+                raise PortError(
+                    f"port config {name} is missing compatibility keys: {missing}"
+                )
+            return data
+    raise PortError(
+        "port config not found next to the port tool "
+        "(expected port.toml or termux-native-sandbox-port.toml); "
+        "refusing to run with implicit defaults"
+    )
+
 
 
 PORT_CONFIG = load_port_config()
@@ -55,10 +81,6 @@ SHMEM = Path("ipc/glue/SharedMemoryPlatform_posix.cpp")
 CUBEB = Path("dom/media/CubebUtils.cpp")
 GKRUST_FEATURES = Path("toolkit/library/rust/gkrust-features.mozbuild")
 RUST_SHARED_CARGO = Path("toolkit/library/rust/shared/Cargo.toml")
-
-
-class PortError(RuntimeError):
-    pass
 
 
 @dataclass

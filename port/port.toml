@@ -1,5 +1,5 @@
 [port]
-version = "2.4.5"
+version = "2.4.6"
 last_validated_port = "2.4.5"
 last_validated_firefox = "155.0.1"
 policy_mode = "fail-closed"

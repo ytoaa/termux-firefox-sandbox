@@ -7,6 +7,16 @@ on:
         description: termux/termux-packages ref to build
         required: false
         default: master
+      force:
+        description: Build even when the Termux Firefox version already matches last_validated_firefox
+        type: boolean
+        required: false
+        default: false
+  schedule:
+    # Follow upstream Termux: weekly check whether the Termux Firefox recipe
+    # version moved past last_validated_firefox.  The expensive build only
+    # runs when it actually did (or on forced manual dispatch).
+    - cron: '0 9 * * 1'
 
 permissions:
   contents: read
@@ -19,8 +29,43 @@ env:
   TERMUX_BUILDER_IMAGE_NAME: termux-firefox-builder:sccache
 
 jobs:
+  check-upstream:
+    name: Check Termux Firefox upstream version
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    outputs:
+      should_build: ${{ steps.gate.outputs.should_build }}
+      firefox_version: ${{ steps.gate.outputs.firefox_version }}
+    steps:
+      - name: Checkout sandbox port
+        uses: actions/checkout@v7
+        with:
+          path: portrepo
+          fetch-depth: 1
+
+      - name: Fetch Termux Firefox recipe
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ref="${{ inputs.termux_ref || 'master' }}"
+          curl -fsSL \
+            "https://raw.githubusercontent.com/termux/termux-packages/${ref}/x11-packages/firefox/build.sh" \
+            -o /tmp/termux-firefox-build.sh
+
+      - name: Decide whether a rebuild is due
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash portrepo/port/ci.sh check-upstream \
+            --build-sh /tmp/termux-firefox-build.sh \
+            --port-toml portrepo/port/port.toml \
+            --force "${{ inputs.force || 'false' }}"
+
   build:
     name: Firefox native sandbox aarch64
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_build == 'true'
     runs-on: ubuntu-26.04
     timeout-minutes: 355
 
@@ -196,3 +241,24 @@ jobs:
             termux-packages/firefox-native-sandbox.generated.patch
           if-no-files-found: ignore
           retention-days: 14
+
+      - name: Failure triage summary
+        if: failure()
+        shell: bash
+        run: |
+          set -uo pipefail
+          {
+            echo "## Native sandbox port failure triage"
+            echo ""
+            echo "- firefox=\`${FIREFOX_VERSION:-?}\` candidate=\`${FIREFOX_CANDIDATE:-?}\` reasons=\`${CANDIDATE_REASONS:-none}\`"
+            echo ""
+            echo '```'
+            grep -hE "PORT ERROR|RECIPE ERROR|anchor changed|contract changed|verification missing|VERIFY SUCCESS|undefined symbol|ld\\.lld: error|Hunk.*FAILED" \
+              termux-packages/firefox-build.log \
+              termux-packages/firefox-native-sandbox-port-report.json 2>/dev/null | tail -n 60
+            sed -n 's/^  *"error": "\(.*\)"$/\1/p' \
+              termux-packages/firefox-native-sandbox-port-report.json 2>/dev/null
+            echo '```'
+            echo ""
+            echo "Full evidence: the diagnostics artifact for this run."
+          } >> "$GITHUB_STEP_SUMMARY"

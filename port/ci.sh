@@ -13,6 +13,7 @@ Usage:
   ci.sh verify-binary <termux-packages-dir>
   ci.sh stats <termux-packages-dir>
   ci.sh diagnostics <termux-packages-dir>
+  ci.sh check-upstream --build-sh <fetched-build.sh> --port-toml <port.toml> [--force true|false]
   ci.sh collect <termux-packages-dir> <portrepo-dir> <metadata.json> <recipe.diff> <artifacts-dir>
 EOF
 }
@@ -322,6 +323,59 @@ diagnostics() {
   set -e
 }
 
+check_upstream() {
+  local build_sh="" toml="" force="false" version validated should reason
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --build-sh) build_sh="${2:?--build-sh requires a value}"; shift 2 ;;
+      --port-toml) toml="${2:?--port-toml requires a value}"; shift 2 ;;
+      --force) force="${2:-false}"; shift 2 ;;
+      *) echo "ERROR: unknown check-upstream argument: $1" >&2; return 2 ;;
+    esac
+  done
+  test -f "$build_sh" || { echo "ERROR: upstream build.sh not fetched: $build_sh" >&2; return 2; }
+  test -f "$toml" || { echo "ERROR: port.toml not found: $toml" >&2; return 2; }
+
+  version="$(sed -n 's/^TERMUX_PKG_VERSION="\{0,1\}\([^"#[:space:]]*\)"\{0,1\}.*$/\1/p' "$build_sh" | head -n1)"
+  if [ -z "$version" ]; then
+    echo "ERROR: TERMUX_PKG_VERSION could not be parsed from upstream build.sh (recipe shape changed?)" >&2
+    return 2
+  fi
+  validated="$(sed -n 's/^last_validated_firefox = "\{0,1\}\([^"#[:space:]]*\)"\{0,1\}.*$/\1/p' "$toml" | head -n1)"
+  if [ -z "$validated" ]; then
+    echo "ERROR: last_validated_firefox missing from port.toml" >&2
+    return 2
+  fi
+
+  should="false"
+  reason="version-matches-last-validated"
+  if [ "$version" != "$validated" ]; then
+    should="true"
+    reason="upstream-version-moved:${validated}->${version}"
+  fi
+  if [ "$force" = "true" ]; then
+    should="true"
+    reason="${reason}+forced"
+  fi
+
+  echo "upstream firefox=$version last_validated=$validated should_build=$should ($reason)"
+  if [ -n "${GITHUB_OUTPUT:-}" ]; then
+    {
+      echo "should_build=$should"
+      echo "firefox_version=$version"
+    } >> "$GITHUB_OUTPUT"
+  fi
+  if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
+    {
+      echo "## Termux Firefox upstream check"
+      echo ""
+      echo "- upstream \`TERMUX_PKG_VERSION\`: \`$version\`"
+      echo "- \`last_validated_firefox\`: \`$validated\`"
+      echo "- build decision: **$should** ($reason)"
+    } >> "$GITHUB_STEP_SUMMARY"
+  fi
+}
+
 collect() {
   local d portrepo metadata recipe_diff out deb
   d="$(need_termux_dir "$1")"
@@ -371,6 +425,7 @@ case "$cmd" in
   verify-binary) [ "$#" -eq 1 ] || { usage; exit 2; }; verify_binary "$1" ;;
   stats) [ "$#" -eq 1 ] || { usage; exit 2; }; show_stats "$1" ;;
   diagnostics) [ "$#" -eq 1 ] || { usage; exit 2; }; diagnostics "$1" ;;
+  check-upstream) [ "$#" -ge 2 ] || { usage; exit 2; }; check_upstream "$@" ;;
   collect) [ "$#" -eq 5 ] || { usage; exit 2; }; collect "$@" ;;
   *) usage; exit 2 ;;
 esac
