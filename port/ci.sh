@@ -364,15 +364,28 @@ check_upstream() {
 
   should="false"
   reasons=()
-  [ "$version" != "$validated" ] && reasons+=("firefox-version:${validated}->${version}")
+  # Rebuild trigger threshold: the minor (0.1-level) segment must move.
+  # Patch-level drift (155.0.1->155.0.2), REVISION bumps and source-hash
+  # swaps are recorded for visibility but do NOT schedule a build.
+  # NOTE: Firefox dot releases carry security fixes — exempting them is an
+  # accepted lag policy of this port; forced dispatch remains the escape hatch.
+  minor_key() { printf '%s' "$1" | cut -d. -f1,2; }
+  if [ "$(minor_key "$version")" != "$(minor_key "$validated")" ]; then
+    should="true"
+    reasons+=("minor-moved:$(minor_key "$validated")->$(minor_key "$version")")
+  fi
+  [ "$version" != "$validated" ] && reasons+=("patch-drift:${validated}->${version}")
   [ "$revision" != "$validated_rev" ] && reasons+=("revision:${validated_rev}->${revision}")
   [ "$(printf '%s' "$srcsha" | tr 'A-F' 'a-f')" != "$(printf '%s' "$validated_src" | tr 'A-F' 'a-f')" ] \
     && reasons+=("source-sha256-changed")
-  if [ "${#reasons[@]}" -gt 0 ]; then
-    should="true"
-    reason="$(IFS=,; echo "${reasons[*]}")"
+  if [ "$should" = "false" ]; then
+    if [ "${#reasons[@]}" -gt 0 ]; then
+      reason="below-threshold:$(IFS=,; echo "${reasons[*]}")"
+    else
+      reason="recipe-identical-to-validated"
+    fi
   else
-    reason="recipe-identical-to-validated"
+    reason="$(IFS=,; echo "${reasons[*]}")"
   fi
   if [ "$force" = "true" ]; then
     should="true"
