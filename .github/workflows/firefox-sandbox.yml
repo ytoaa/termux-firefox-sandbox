@@ -255,9 +255,9 @@ jobs:
             echo '```'
             grep -hE "PORT ERROR|RECIPE ERROR|anchor changed|contract changed|verification missing|VERIFY SUCCESS|undefined symbol|ld\\.lld: error|Hunk.*FAILED" \
               termux-packages/firefox-build.log \
-              termux-packages/firefox-native-sandbox-port-report.json 2>/dev/null | tail -n 60
+              termux-packages/firefox-native-sandbox-port-report.json 2>/dev/null | tail -n 60 || true
             sed -n 's/^  *"error": "\(.*\)"$/\1/p' \
-              termux-packages/firefox-native-sandbox-port-report.json 2>/dev/null
+              termux-packages/firefox-native-sandbox-port-report.json 2>/dev/null || true
             echo '```'
             echo ""
             echo "Full evidence: the diagnostics artifact for this run."

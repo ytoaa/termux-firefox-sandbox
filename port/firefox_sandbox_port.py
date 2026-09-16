@@ -968,6 +968,18 @@ class Port:
             if "PR_GET_DUMPABLE" not in scope or "PR_PAC_RESET_KEYS" not in scope:
                 raise PortError(f"{class_name}: Termux prctl compatibility incomplete")
 
+    # Policies that exist in the upstream factory but have no reachable
+    # activation path in the Firefox we build (no launcher process type, no
+    # dispatcher call site).  They are whitelisted from Termux mapping ONLY
+    # while that unreachability holds; the scan below re-blocks the build the
+    # moment upstream wires one up, forcing a real Termux mapping review.
+    UNREACHABLE_KNOWN = {"GetHWInferencePolicy"}
+    # 156.0 (2026-09, run #27 evidence): GetHWInferencePolicy() is defined in
+    # the broker factory but referenced nowhere - no ProcessType launcher in
+    # ipc/glue, no dispatcher in SandboxBroker.cpp, no hwinference component
+    # or pref in the source tree.  Granting it $PREFIX/lib reads would be a
+    # latent privilege widening for unreachable code.
+
     def verify_upstream_policy_parity(self) -> None:
         """Detect a new Linux process policy that likely needs Termux mapping.
 
@@ -993,9 +1005,42 @@ class Port:
             scope = text[start:end]
             linux_runtime = any(p in scope for p in ('"/usr/lib', '"/lib64"', 'AddLdconfigPaths('))
             if linux_runtime and "AddTermuxRuntimeReadPaths" not in scope:
+                if name in self.UNREACHABLE_KNOWN:
+                    self._require_policy_unreachable(text, name)
+                    continue
                 raise PortError(
                     f"new/unknown broker policy {name} has Linux runtime-library access "
                     "but no Termux mapping; manual review required"
+                )
+
+    def _require_policy_unreachable(self, factory_text: str, name: str) -> None:
+        """Re-block the build if upstream wires an unreachable-whitelisted policy.
+
+        A definition alone is inert; any call site (unqualified inside the
+        factory, or qualified) means the process is actually launchable and
+        then the policy needs a real Termux mapping review instead of a
+        whitelist entry.
+        """
+        total = factory_text.count(f"{name}(")
+        # Exactly one occurrence is the definition itself (its qualified form
+        # "Factory::Name(" contains "Name(" as substring).  Anything above
+        # that — unqualified or qualified calls, extra definitions, or even
+        # commented wiring — means the policy may be reachable and needs a
+        # real Termux mapping review (fail closed).
+        if total > 1:
+            raise PortError(
+                f"unreachable whitelist invalid: {name} has {total - 1} extra "
+                "reference(s) in the factory beyond its definition; add it to "
+                "the explicit Termux mapping targets after review"
+            )
+        broker_impl = self.root / Path("security/sandbox/linux/broker/SandboxBroker.cpp")
+        if broker_impl.is_file():
+            extra = broker_impl.read_text().count(f"{name}(")
+            if extra > 0:
+                raise PortError(
+                    f"unreachable whitelist invalid: {name} now has {extra} "
+                    "call site(s) in the broker dispatcher; add it to the "
+                    "explicit Termux mapping targets after review"
                 )
 
     def verify_termux_package_assumptions(self) -> None:
