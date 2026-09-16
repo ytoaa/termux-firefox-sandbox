@@ -346,19 +346,40 @@ check_upstream() {
     echo "ERROR: last_validated_firefox missing from port.toml" >&2
     return 2
   fi
+  validated_rev="$(sed -n 's/^last_validated_revision = "\{0,1\}\([^"#[:space:]]*\)"\{0,1\}.*$/\1/p' "$toml" | head -n1)"
+  validated_src="$(sed -n 's/^last_validated_srcsha256 = "\{0,1\}\([^"#[:space:]]*\)"\{0,1\}.*$/\1/p' "$toml" | head -n1)"
+  if [ -z "$validated_rev" ] || [ -z "$validated_src" ]; then
+    echo "ERROR: last_validated_revision / last_validated_srcsha256 missing from port.toml" >&2
+    return 2
+  fi
+
+  # Termux omits TERMUX_PKG_REVISION when it is 0.
+  revision="$(sed -n 's/^TERMUX_PKG_REVISION="\{0,1\}\([^"#[:space:]]*\)"\{0,1\}.*$/\1/p' "$build_sh" | head -n1)"
+  revision="${revision:-0}"
+  srcsha="$(sed -n 's/^TERMUX_PKG_SHA256="\{0,1\}\([0-9a-fA-F]*\)"\{0,1\}.*$/\1/p' "$build_sh" | head -n1)"
+  if [ -z "$srcsha" ]; then
+    echo "ERROR: TERMUX_PKG_SHA256 could not be parsed from upstream build.sh (recipe shape changed?)" >&2
+    return 2
+  fi
 
   should="false"
-  reason="version-matches-last-validated"
-  if [ "$version" != "$validated" ]; then
+  reasons=()
+  [ "$version" != "$validated" ] && reasons+=("firefox-version:${validated}->${version}")
+  [ "$revision" != "$validated_rev" ] && reasons+=("revision:${validated_rev}->${revision}")
+  [ "$(printf '%s' "$srcsha" | tr 'A-F' 'a-f')" != "$(printf '%s' "$validated_src" | tr 'A-F' 'a-f')" ] \
+    && reasons+=("source-sha256-changed")
+  if [ "${#reasons[@]}" -gt 0 ]; then
     should="true"
-    reason="upstream-version-moved:${validated}->${version}"
+    reason="$(IFS=,; echo "${reasons[*]}")"
+  else
+    reason="recipe-identical-to-validated"
   fi
   if [ "$force" = "true" ]; then
     should="true"
     reason="${reason}+forced"
   fi
 
-  echo "upstream firefox=$version last_validated=$validated should_build=$should ($reason)"
+  echo "upstream firefox=$version revision=$revision srcsha=${srcsha:0:12}… last_validated=($validated,$validated_rev,${validated_src:0:12}…) should_build=$should ($reason)"
   if [ -n "${GITHUB_OUTPUT:-}" ]; then
     {
       echo "should_build=$should"
@@ -369,8 +390,8 @@ check_upstream() {
     {
       echo "## Termux Firefox upstream check"
       echo ""
-      echo "- upstream \`TERMUX_PKG_VERSION\`: \`$version\`"
-      echo "- \`last_validated_firefox\`: \`$validated\`"
+      echo "- upstream recipe: \`TERMUX_PKG_VERSION=$version\`, \`REVISION=$revision\`, source \`sha256 ${srcsha:0:16}…\`"
+      echo "- validated recipe: \`($validated, rev $validated_rev, ${validated_src:0:16}…)\`"
       echo "- build decision: **$should** ($reason)"
     } >> "$GITHUB_STEP_SUMMARY"
   fi

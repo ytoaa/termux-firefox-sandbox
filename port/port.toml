@@ -2,6 +2,10 @@
 version = "2.4.6"
 last_validated_port = "2.4.5"
 last_validated_firefox = "155.0.1"
+# Full-identity pin: the upstream check rebuilds unless version+revision+source-hash
+# ALL match this validated recipe (any drift, even same-version revisions, triggers).
+last_validated_revision = "0"
+last_validated_srcsha256 = "7548acd4788d4d0dce7ef9e14e62f7041df8746d9cfe4c05e923747954370d13"
 policy_mode = "fail-closed"
 
 [termux]
