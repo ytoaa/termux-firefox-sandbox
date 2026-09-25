@@ -8,4 +8,4 @@
 #
 # The check-upstream gate still reads the live recipe as its ground truth;
 # this file is not consumed by the build itself.
-termuxFirefoxVersion = "156.0.1"
+termuxFirefoxVersion = "156.0"
