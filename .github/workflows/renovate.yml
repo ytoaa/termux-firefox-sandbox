@@ -1,0 +1,46 @@
+name: Renovate upstream firefox watcher
+
+# Runs ON GITHUB RUNNERS only; executes nothing on developer devices.
+# Every hour Renovate fetches the live Termux firefox recipe and, if its
+# TERMUX_PKG_VERSION moved past port/upstream.renovate, opens an update PR.
+# Merging that PR triggers the gated build via the push trigger in
+# firefox-sandbox.yml.  The daily schedule trigger there remains the safety
+# net if this watcher ever stalls.
+
+on:
+  schedule:
+    - cron: '0 * * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'full = log-only dry run, no PRs'
+        type: choice
+        required: false
+        default: 'null'
+        options: ['null', 'full', 'lookup']
+
+permissions: {}
+
+concurrency:
+  group: renovate-upstream-watcher
+  cancel-in-progress: true
+
+jobs:
+  renovate:
+    name: Check Termux firefox recipe
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Renovate
+        uses: renovatebot/github-action@v46.3.4
+        with:
+          configurationFile: renovate.json
+          token: ${{ secrets.GITHUB_TOKEN }}
+          renovate-dry-run: ${{ inputs.dry_run || 'null' }}

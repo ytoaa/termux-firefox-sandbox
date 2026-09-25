@@ -17,6 +17,13 @@ on:
     # version moved past last_validated_firefox.  The expensive build only
     # runs when it actually did (or on forced manual dispatch).
     - cron: '0 9 * * *'
+  push:
+    # Human-approval fast path: merging the Renovate PR that updates
+    # port/upstream.renovate means a maintainer approved the new upstream
+    # version, so build it immediately (dots included; the scheduled gate
+    # below-threshold logic otherwise defers dots until the next minor).
+    paths:
+      - port/upstream.renovate
 
 permissions:
   contents: read
@@ -60,7 +67,7 @@ jobs:
           bash portrepo/port/ci.sh check-upstream \
             --build-sh /tmp/termux-firefox-build.sh \
             --port-toml portrepo/port/port.toml \
-            --force "${{ inputs.force || 'false' }}"
+            --force "${{ inputs.force || github.event_name == 'push' }}"
 
   build:
     name: Firefox native sandbox aarch64
