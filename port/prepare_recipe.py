@@ -112,48 +112,58 @@ def ensure_preconfigure_hook(text: str) -> str:
     return text.replace(fn, fn + block, 1)
 
 
-def bump_revision_once(text: str) -> tuple[str, int]:
-    if REV_MARK in text:
-        revision = read_scalar(text, "TERMUX_PKG_REVISION")
-        return text, int(revision or "0")
+def bump_revision_once(text: str, port_version: str) -> tuple[str, str]:
+    """Compose the Debian revision as <upstream_rev+1>.<port_version>.
 
-    m = re.search(r"^TERMUX_PKG_REVISION=(\d+)\s*$", text, re.MULTILINE)
+    The port_version suffix makes same-source port rebuilds apt-visible
+    (156.1.1-1.2.4.6 -> 156.1.1-1.2.4.7 is a real upgrade).  Re-runs over an
+    already-prepared recipe rewrite only the suffix, keeping the +1 base.
+    """
+    m = re.search(r"^TERMUX_PKG_REVISION=(\d+)(?:\.\d+(?:\.\d+)*)?\s*$", text, re.MULTILINE)
+    if REV_MARK in text:
+        if not m:
+            raise RecipeError("prepared recipe has unreadable TERMUX_PKG_REVISION")
+        revision = f"{int(m.group(1))}.{port_version}"
+        return text[: m.start()] + f"TERMUX_PKG_REVISION={revision}" + text[m.end():], revision
     if m:
-        revision = int(m.group(1)) + 1
+        revision = f"{int(m.group(1)) + 1}.{port_version}"
         replacement = f"TERMUX_PKG_REVISION={revision}\n{REV_MARK}"
-        return text[: m.start()] + replacement + text[m.end() :], revision
+        return text[: m.start()] + replacement + text[m.end():], revision
 
     v = re.search(r"^TERMUX_PKG_VERSION=.*$", text, re.MULTILINE)
     if not v:
         raise RecipeError("TERMUX_PKG_VERSION not found")
-    revision = 1
+    revision = f"1.{port_version}"
     insertion = f"\nTERMUX_PKG_REVISION={revision}\n{REV_MARK}"
-    return text[: v.end()] + insertion + text[v.end() :], revision
+    return text[: v.end()] + insertion + text[v.end():], revision
 
 
 # Debian-ordered package version lead over the Termux channel package.
 #
 # Motivation: with equal versions, `pkg upgrade firefox` on a device that has
 # our sandbox deb installed can silently replace it with Termux's official
-# sandbox-off build whenever Termux bumps its version.  Publishing our deb at
-# <major>.1 keeps our installation strictly newer than every release of the
-# same major series, so only an explicit port rebuild ever changes the
-# installed browser.
+# sandbox-off build whenever Termux bumps its version.  Publishing our deb
+# strictly above every same-series Termux release keeps the sandboxed browser
+# installed until an explicit port rebuild changes it.
 #
-# Safety (verified 2026-09-16 against archive.mozilla.org release history):
-# Firefox >= 100 has never shipped a second segment != 0 (167 rapid releases,
-# all N.0[.k]); dot releases stay in the third segment (up to N.0.6).  A
-# <major>.1 lead therefore never collides with a real Firefox release and
-# outranks every same-series dot bump Termux may publish.  On a new major,
-# the upstream gate rebuilds and the lead moves to the next <major>.1.
-PACKAGED_MINOR_LEAD = "1"
-
-
+# Scheme (decision B, 2026-09-25): source `M.m.p` publishes as `M.(m+1).p`,
+# with the trailing `.0` patch dropped.  156.0 -> 156.1, 156.0.1 -> 156.1.1.
+# Carrying the real patch segment makes Firefox dot releases (which carry
+# security fixes) *upgrade-visible* under apt across our own builds, while the
+# +1 minor lead still strictly outranks every Termux channel build of the same
+# major series.  Verified 2026-09-16 against archive.mozilla.org (167 rapid
+# releases, all N.0[.k]) that Firefox >= 100 never ships a second segment != 0
+# nor a real N.1, so the lead space is collision-free; ci.sh re-checks that
+# invariant fail-closed at every gate run.  On a new major the gate rebuilds
+# and the lead moves to the next <major>.1.
 def packaged_version(source_version: str) -> str:
-    major = source_version.split(".")[0]
-    if not major.isdigit():
+    parts = source_version.split(".")
+    if len(parts) not in (2, 3) or not all(p.isdigit() for p in parts):
         raise RecipeError(f"cannot derive packaged version from {source_version!r}")
-    return f"{major}.{PACKAGED_MINOR_LEAD}"
+    major, minor = parts[0], int(parts[1])
+    patch = int(parts[2]) if len(parts) == 3 else 0
+    lead = f"{major}.{minor + 1}"
+    return lead if patch == 0 else f"{lead}.{patch}"
 
 
 def raise_package_version(text: str, source_version: str) -> str:
@@ -186,6 +196,12 @@ def main() -> int:
     here = Path(__file__).resolve().parent
     cfg = tomllib.loads((here / "port.toml").read_text())
     port_version = cfg["port"]["version"]
+    if not re.fullmatch(r"\d+(\.\d+)*", str(port_version)):
+        raise RecipeError(
+            f"port.version {port_version!r} must be dot-separated numbers: Debian splits the"
+            " version at the LAST hyphen, so an rc suffix would rank ABOVE the final build"
+            " (keep -rcN only in git tags)"
+        )
     last_validated_port = cfg["port"].get("last_validated_port", port_version)
     last_validated = cfg["port"]["last_validated_firefox"]
 
@@ -200,15 +216,24 @@ def main() -> int:
     if not version:
         raise RecipeError("could not parse TERMUX_PKG_VERSION")
     # On re-runs over an already-prepared recipe, the published VERSION is the
-    # <major>.1 lead.  Firefox >= 100 never releases N.1 (verified against the
-    # full archive), so this form is unambiguous: recover the true source
-    # version from the materialized SRCURL instead of misreading the lead.
-    if REV_MARK in original and re.fullmatch(r"\d+\.1", version):
+    # lead `M.1[.p]` (packaged_version of the true source).  Firefox >= 100
+    # never releases a real N.1 (verified against the full archive; ci.sh
+    # enforces the invariant fail-closed), so this form is unambiguous:
+    # recover the true source version from the materialized SRCURL instead of
+    # misreading the lead.
+    if REV_MARK in original and re.fullmatch(r"\d+\.1(?:\.\d+)?", version):
         m = re.search(r"/releases/([^/]+)/source/", read_scalar(original, "TERMUX_PKG_SRCURL") or "")
         if not m:
             raise RecipeError("prepared recipe lacks a materialized source URL to recover the true version")
         version = m.group(1)
-    original_revision = int(read_scalar(original, "TERMUX_PKG_REVISION") or "0")
+    # Termux omits TERMUX_PKG_REVISION when it is 0.  On re-runs the line holds
+    # our composed "<base>.<port_version>" where base = upstream_rev + 1, so
+    # recover the upstream value by stripping the suffix and the +1.
+    rev_raw = read_scalar(original, "TERMUX_PKG_REVISION") or "0"
+    rev_m = re.match(r"(\d+)", rev_raw)
+    if not rev_m:
+        raise RecipeError(f"unparsable TERMUX_PKG_REVISION {rev_raw!r}")
+    original_revision = int(rev_m.group(1)) - (1 if REV_MARK in original else 0)
 
     ensure_mozconfig(mozconfig)
 
@@ -216,9 +241,10 @@ def main() -> int:
     text = ensure_dependency(text)
     text = ensure_linker_flag(text)
     text = ensure_preconfigure_hook(text)
-    text, custom_revision = bump_revision_once(text)
-    # Publish at <major>.1 so our deb strictly outranks Termux channel builds
-    # of the same series (see PACKAGED_MINOR_LEAD rationale above).
+    text, custom_revision = bump_revision_once(text, port_version)
+    # Publish at `M.(m+1).p` so our deb strictly outranks Termux channel builds
+    # of the same series while dot drift stays upgrade-visible (see
+    # packaged_version rationale above).
     text = raise_package_version(text, version)
     build.write_text(text)
 
@@ -263,7 +289,7 @@ def main() -> int:
     ):
         if token not in final_build:
             raise RecipeError(f"recipe verification missing {token!r}")
-    # Version lead contract: published version at <major>.1, source URL pinned
+    # Version lead contract: published version at `M.(m+1).p`, source URL pinned
     # to the real source version (no unexpanded template referencing VERSION).
     if read_scalar(final_build, "TERMUX_PKG_VERSION") != packaged_version(version):
         raise RecipeError("package version lead not applied")

@@ -228,7 +228,7 @@ jobs:
         if: success()
         uses: actions/upload-artifact@v6
         with:
-          name: firefox-native-sandbox-aarch64-v${{ steps.prepare.outputs.port_version }}
+          name: firefox-native-sandbox-aarch64-v${{ steps.prepare.outputs.port_version }}-ff${{ steps.prepare.outputs.firefox_version }}
           path: artifacts/
           if-no-files-found: error
           compression-level: 0
@@ -238,7 +238,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v6
         with:
-          name: firefox-native-sandbox-build-diagnostics-v${{ steps.prepare.outputs.port_version }}
+          name: firefox-native-sandbox-build-diagnostics-v${{ steps.prepare.outputs.port_version }}-ff${{ steps.prepare.outputs.firefox_version }}
           path: |
             firefox-port-metadata.json
             firefox-recipe-changes.diff

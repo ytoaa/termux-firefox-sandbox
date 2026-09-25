@@ -364,11 +364,21 @@ check_upstream() {
 
   should="false"
   reasons=()
+  # Fail-closed invariant for the <major>.1 packaging lead (prepare_recipe.
+  # packaged_version): Firefox >= 100 has never shipped a second segment != 0.
+  # If upstream ever publishes N.1, our lead form would collide with a real
+  # release, so stop BEFORE any build decision — force cannot bypass this.
+  seg2="${version#*.}"; seg2="${seg2%%.*}"
+  if [ "$seg2" != "0" ]; then
+    echo "ERROR: invariant violated: upstream firefox $version has non-zero second segment (expected N.0[.k]); the packaging lead cannot be applied safely — human review required" >&2
+    return 2
+  fi
   # Rebuild trigger threshold: the minor (0.1-level) segment must move.
   # Patch-level drift (155.0.1->155.0.2), REVISION bumps and source-hash
-  # swaps are recorded for visibility but do NOT schedule a build.
-  # NOTE: Firefox dot releases carry security fixes — exempting them is an
-  # accepted lag policy of this port; forced dispatch remains the escape hatch.
+  # swaps are recorded for visibility but do NOT schedule a build from the
+  # schedule.  Dot releases carry security fixes: they reach users through the
+  # Renovate watcher's approval PR (merge = human approval, push trigger runs
+  # with force=true), or via manual forced dispatch as the escape hatch.
   minor_key() { printf '%s' "$1" | cut -d. -f1,2; }
   if [ "$(minor_key "$version")" != "$(minor_key "$validated")" ]; then
     should="true"
