@@ -12,20 +12,23 @@
       "matchStrings": [
         "termuxFirefoxVersion\\s*=\\s*\"(?<currentValue>[0-9][0-9.]*)\""
       ],
-      "datasourceTemplate": "customText",
       "depNameTemplate": "termux-firefox-upstream",
+      "datasourceTemplate": "custom.termux-firefox",
       "versioningTemplate": "regex:^(?<major>\\d+)\\.(?<minor>\\d+)(?:\\.(?<patch>\\d+))?$"
     }
   ],
+  "customDatasources": {
+    "termux-firefox": {
+      "defaultRegistryUrlTemplate": "https://raw.githubusercontent.com/termux/termux-packages/master/x11-packages/firefox/build.sh",
+      "format": "plain",
+      "transformTemplates": [
+        "{\"releases\": $map($match($, /TERMUX_PKG_VERSION=\"([0-9][0-9.]*)\"/), function($m){ {\"version\": $m.groups[0][0]} })}"
+      ]
+    }
+  },
   "packageRules": [
     {
       "matchDepNames": ["termux-firefox-upstream"],
-      "registryUrls": [
-        "https://raw.githubusercontent.com/termux/termux-packages/master/x11-packages/firefox/build.sh"
-      ],
-      "matchStrings": [
-        "TERMUX_PKG_VERSION=\"(?<currentValue>[0-9][0-9.]*)\""
-      ],
       "enabled": true,
       "labels": ["upstream", "renovate"],
       "commitMessageTopic": "Termux upstream Firefox"
