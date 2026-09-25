@@ -49,7 +49,7 @@ jobs:
         env:
           RENOVATE_REPOSITORIES: ${{ github.repository }}
           LOG_LEVEL: ${{ inputs.log_level || 'info' }}
+          RENOVATE_DRY_RUN: ${{ inputs.dry_run }}
         with:
           configurationFile: renovate.json
           token: ${{ secrets.GITHUB_TOKEN }}
-          renovate-dry-run: ${{ inputs.dry_run || 'null' }}
