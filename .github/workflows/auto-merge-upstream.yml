@@ -1,0 +1,76 @@
+name: Auto-merge Renovate upstream bump PRs
+
+# Exception-only maintainer policy: merge Renovate's anchor-bump PRs when the
+# fail-closed checks in port/auto_merge_upstream.sh all pass; escalate
+# anything else with a needs-human comment instead of merging.
+#
+# Triggered by the hourly watcher's completion (workflow_run is the
+# sanctioned chain that bypasses GITHUB_TOKEN event suppression).  The merge
+# itself is performed with GITHUB_TOKEN, which by design does NOT fire the
+# repo's push trigger, so the build is invoked explicitly below via
+# workflow_call(force=true).  Human merges keep using the push fast path.
+
+on:
+  workflow_run:
+    workflows: ["Renovate upstream firefox watcher"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Evaluate only this PR number (leave empty for auto-discovery)'
+        required: false
+        type: string
+      dry_run:
+        description: 'true = verdict comments only, never merge'
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: auto-merge-upstream
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    name: Evaluate & merge anchor bump PRs
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write        # merge (GITHUB_TOKEN), read anchor
+      pull-requests: write   # comment + merge
+      issues: write          # needs-human label
+    outputs:
+      merged: ${{ steps.evaluate.outputs.merged }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Fetch live Termux recipe (ground truth)
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl -fsSL \
+            "https://raw.githubusercontent.com/termux/termux-packages/master/x11-packages/firefox/build.sh" \
+            -o /tmp/build.sh
+
+      - name: Evaluate candidates
+        id: evaluate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: bash port/auto_merge_upstream.sh
+
+  build-after-merge:
+    name: Build merged upstream bump
+    needs: triage
+    if: needs.triage.outputs.merged == 'true' && inputs.dry_run != true
+    uses: ./.github/workflows/firefox-sandbox.yml
+    with:
+      force: true
+      termux_ref: master

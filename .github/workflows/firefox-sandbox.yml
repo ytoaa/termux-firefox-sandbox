@@ -1,6 +1,20 @@
 name: Build Termux Firefox Native Sandbox Port
 
 on:
+  workflow_call:
+    # Called by auto-merge-upstream.yml after a GITHUB_TOKEN merge (whose
+    # push event is suppressed by GitHub recursion rules).  force=true is
+    # required for dot bumps: the schedule gate alone would classify them
+    # below-threshold.
+    inputs:
+      termux_ref:
+        type: string
+        required: false
+        default: master
+      force:
+        type: boolean
+        required: false
+        default: false
   workflow_dispatch:
     inputs:
       termux_ref:
