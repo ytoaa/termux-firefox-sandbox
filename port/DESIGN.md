@@ -163,7 +163,7 @@ Consequences accepted by this policy:
   releases carry security fixes, so adopting them waits for the next minor
   rebuild unless a human dispatches the workflow with `force=true`.
 - Between a Termux major bump (e.g. 157.0) and our first 157 build, Termux's
-  new major temporarily outranks our stale `156.1` lead.  The weekly gate /
+  new major temporarily outranks our stale `156.1` lead.  The daily gate /
   manual dispatch closes this window; `apt-mark hold firefox` removes it
   entirely for users who prefer no automatic replacement at all.
 - Package managers and `about:support` show different numbers on purpose:

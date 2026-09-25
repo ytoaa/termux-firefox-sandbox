@@ -13,10 +13,10 @@ on:
         required: false
         default: false
   schedule:
-    # Follow upstream Termux: weekly check whether the Termux Firefox recipe
+    # Follow upstream Termux: daily check whether the Termux Firefox recipe
     # version moved past last_validated_firefox.  The expensive build only
     # runs when it actually did (or on forced manual dispatch).
-    - cron: '0 9 * * 1'
+    - cron: '0 9 * * *'
 
 permissions:
   contents: read
