@@ -22,7 +22,7 @@
       "defaultRegistryUrlTemplate": "https://raw.githubusercontent.com/termux/termux-packages/master/x11-packages/firefox/build.sh",
       "format": "plain",
       "transformTemplates": [
-        "{\"releases\": [ {\"version\": $match($filter($append([], $), function($l){ $contains($l, \"TERMUX_PKG_VERSION=\") })[0], /TERMUX_PKG_VERSION=\"([0-9][0-9.]*)\"/).groups[0]} ] }"
+        "{\"releases\": [ $map($filter($.releases, function($r){ $contains($r.version, \"TERMUX_PKG_VERSION=\") }), function($r){ {\"version\": $match($r.version, /TERMUX_PKG_VERSION=\"([0-9][0-9.]*)\"/).groups[0]} }) ] }"
       ]
     }
   },
