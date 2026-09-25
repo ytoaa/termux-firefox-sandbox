@@ -18,6 +18,12 @@ on:
         required: false
         default: 'null'
         options: ['null', 'full', 'lookup']
+      log_level:
+        description: 'Renovate LOG_LEVEL'
+        type: choice
+        required: false
+        default: 'info'
+        options: ['info', 'debug']
 
 permissions: {}
 
@@ -42,6 +48,7 @@ jobs:
         uses: renovatebot/github-action@v46.3.4
         env:
           RENOVATE_REPOSITORIES: ${{ github.repository }}
+          LOG_LEVEL: ${{ inputs.log_level || 'info' }}
         with:
           configurationFile: renovate.json
           token: ${{ secrets.GITHUB_TOKEN }}
