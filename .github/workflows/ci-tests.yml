@@ -1,0 +1,68 @@
+name: Port test harness (pre-merge)
+
+# FIX-7 (10-02 panel, DO-FIRST): port/tests/run_tests.sh has existed with 76
+# assertions since 09-28 but was wired into ZERO workflows — every watcher/
+# heartbeat/gate ship this window went out untested, and both monitoring
+# fix-batches (PR#8->I-5, PR#13->I-6) shipped same-day breakages (base rate
+# 2/2). This workflow is the missing pre-merge enforcement for the scripts
+# that hold merge authority.
+#
+# Codified dry-run-before-merge rule (same panel ruling (b)): for workflow-YAML
+# SEMANTICS the harness cannot model (permissions ceilings, trigger events,
+# event-type query shapes), rehearse the changed workflow via workflow_dispatch
+# dry-run against the PR branch BEFORE merging — precedent: PR #10 (live-verified
+# dry-run caught the gh-POST-default fix working pre-merge). The harness covers
+# script logic; the dry-run covers Actions semantics; together 2/2 regression
+# classes observed this window.
+#
+# NO paths filter (10-02 review): a `paths:` gate on port/** would let a
+# workflow-only PR merge without ever running the harness — yet the most
+# damaging outages this repo has seen were workflow ORCHESTRATION defects
+# (permissions ceiling, watcher green-masking, heartbeat blind spots). The
+# harness is minutes cheap; workflow coverage is not optional. Manual
+# dispatch is also available for rehearsal on a branch before merge.
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  harness:
+    name: run_tests.sh (gate + release + watcher fixtures)
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - name: bash -n on every port shell script
+        run: |
+          set -euo pipefail
+          find port -name '*.sh' -print0 | xargs -0 -n1 bash -n
+      - name: py_compile every port python module
+        run: |
+          set -euo pipefail
+          python3 -m py_compile port/prepare_recipe.py port/firefox_sandbox_port.py
+      - name: parse every workflow YAML
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import glob, sys
+          try:
+              import yaml
+          except ImportError:
+              print("PyYAML unavailable on runner — structural greps still run in the harness")
+              sys.exit(0)
+          bad = []
+          for p in sorted(glob.glob(".github/workflows/*.yml")):
+              try:
+                  yaml.safe_load(open(p))
+              except Exception as e:
+                  bad.append(f"{p}: {e}")
+          if bad:
+              print("\n".join(bad), file=sys.stderr)
+              sys.exit(1)
+          print(f"YAML parse OK: {len(glob.glob('.github/workflows/*.yml'))} workflows")
+          PY
+      - name: full harness (stub-GitHub fixtures, zero network)
+        run: bash port/tests/run_tests.sh

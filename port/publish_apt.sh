@@ -97,7 +97,12 @@ release = [
     "Components: main",
     "Description: Validated sandbox-port Firefox builds (version-lead scheme)",
 ]
-for algo, idx in (("MD5Sum", 0), ("SHA1Sum", 1), ("SHA256Sum", 2), ("SHA512Sum", 3)):
+# Labels MUST be the canonical Debian Release names.  apt parses "SHA256:";
+# "SHA256Sum:" is silently ignored and makes real apt print
+# "W: No Hash entry in Release ... strong enough" (live-observed 2026-10-02
+# running apt-get update against the published channel).  MD5Sum keeps its
+# historical spelling; SHA1/SHA256/SHA512 do NOT take a "Sum" suffix.
+for algo, idx in (("MD5Sum", 0), ("SHA1", 1), ("SHA256", 2), ("SHA512", 3)):
     release.append(algo + ":")
     for name, sz, *ds in rows:
         release.append(f" {ds[idx]} {sz} {name}")

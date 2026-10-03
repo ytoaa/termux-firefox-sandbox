@@ -45,6 +45,14 @@ on:
     # port/upstream.renovate means a maintainer approved the new upstream
     # version, so build it immediately (dots included; the scheduled gate
     # below-threshold logic otherwise defers dots until the next minor).
+    #
+    # branches filter is MANDATORY, not cosmetic: a bare `push:` also fires on
+    # tag pushes, and a release tag points at an older commit, so the run
+    # executes that OLD workflow + OLD make_release.sh.  That is exactly how
+    # creating v2.4.7-ff157.0 re-ran the pre-PR#20 tag policy and published a
+    # second, byte-different 157 deb under the legacy v2.4.7 tag.
+    branches:
+      - main
     paths:
       - port/upstream.renovate
 
@@ -66,6 +74,11 @@ jobs:
     outputs:
       should_build: ${{ steps.gate.outputs.should_build }}
       firefox_version: ${{ steps.gate.outputs.firefox_version }}
+      # Exact 40-hex termux-packages commit resolved ONCE from
+      # inputs.termux_ref at workflow start.  Every consumer (recipe fetch
+      # here, termux-packages checkout in build, metadata) uses THIS value,
+      # so a mutable ref like 'master' can no longer drift between jobs.
+      termux_commit: ${{ steps.resolve.outputs.termux_commit }}
     steps:
       - name: Checkout sandbox port
         uses: actions/checkout@v7
@@ -73,13 +86,30 @@ jobs:
           path: portrepo
           fetch-depth: 1
 
+      - name: Resolve Termux ref to exact commit (fail closed)
+        id: resolve
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          ref="${{ inputs.termux_ref || 'master' }}"
+          # URL-encode fully: refs may contain '/' (refs/heads/...), and a
+          # 40-hex SHA passes through unchanged.
+          enc=$(python3 -c 'import sys,urllib.parse;print(urllib.parse.quote(sys.argv[1], safe=""))' "$ref")
+          sha=$(gh api --method GET "repos/termux/termux-packages/commits/${enc}" --jq .sha) \
+            || { echo "ERROR: cannot resolve termux-packages ref '$ref'" >&2; exit 1; }
+          printf '%s' "$sha" | grep -qE '^[0-9a-f]{40}$' \
+            || { echo "ERROR: resolved ref '$ref' is not a 40-hex commit SHA: '$sha'" >&2; exit 1; }
+          echo "resolved termux-packages '$ref' -> $sha"
+          echo "termux_commit=$sha" >> "$GITHUB_OUTPUT"
+
       - name: Fetch Termux Firefox recipe
         shell: bash
         run: |
           set -euxo pipefail
-          ref="${{ inputs.termux_ref || 'master' }}"
           curl -fsSL \
-            "https://raw.githubusercontent.com/termux/termux-packages/${ref}/x11-packages/firefox/build.sh" \
+            "https://raw.githubusercontent.com/termux/termux-packages/${{ steps.resolve.outputs.termux_commit }}/x11-packages/firefox/build.sh" \
             -o /tmp/termux-firefox-build.sh
 
       - name: Decide whether a rebuild is due
@@ -114,7 +144,10 @@ jobs:
         uses: actions/checkout@v7
         with:
           repository: termux/termux-packages
-          ref: ${{ inputs.termux_ref }}
+          # Same pinned SHA the check-upstream job resolved and read the
+          # recipe at — check and build can never observe different upstream
+          # states (a mutable ref would allow drift between the two jobs).
+          ref: ${{ needs.check-upstream.outputs.termux_commit }}
           path: termux-packages
           fetch-depth: 1
 
@@ -333,11 +366,28 @@ jobs:
 
       - name: Publish apt channel (GitHub Pages)
         # Same gate as the release: validated builds only; skipped on dry-run.
-        # Users add: deb [trusted=yes arch=aarch64]
-        #   https://ytoaa.github.io/termux-firefox-sandbox/apt stable main
+        # Users add (canonical: the apt tree lives at the gh-pages BRANCH
+        # ROOT — publish replaces dists/+pool/ at the root and Pages serves
+        # the root site; there is deliberately no /apt subpath):
+        #   deb [trusted=yes arch=aarch64] https://ytoaa.github.io/termux-firefox-sandbox stable main
+        # Pool preservation: RUNNER_TEMP starts EMPTY, so the index command
+        # alone would regenerate the channel with only the current deb and
+        # the publish step (which replaces dists+pool wholesale) would DROP
+        # every previously published build — observed on gh-pages when the
+        # 157 build removed the 156 deb.  Seed the aptrepo pool from the
+        # published branch first so `index` always regenerates from the
+        # COMPLETE pool (accumulation + deterministic re-index, as the
+        # publish_apt.sh contract intends).
         if: inputs.release_dry_run != true
         shell: bash
         run: |
           set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/aptrepo/pool"
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git fetch -q --depth=1 origin gh-pages
+            # existing pool files land beside the new deb; same-name debs are
+            # overwritten by the index copy (rebuild of an identical version)
+            git archive FETCH_HEAD pool 2>/dev/null | tar -x -C "$RUNNER_TEMP/aptrepo" || true
+          fi
           bash port/publish_apt.sh index pkg "$RUNNER_TEMP/aptrepo" stable aarch64
           bash port/publish_apt.sh publish "$RUNNER_TEMP/aptrepo" gh-pages origin

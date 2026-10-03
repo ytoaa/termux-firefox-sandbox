@@ -62,3 +62,15 @@ jobs:
         with:
           configurationFile: renovate.json
           token: ${{ secrets.GITHUB_TOKEN }}
+
+      # Outcome assertion (10-02 panel ruling (a), I-9 class catcher):
+      # Renovate exits 0 even when its PR-creation write is denied (the repo
+      # 'Actions can create/approve PRs' toggle 403'd every POST /pulls for a
+      # week behind a DEBUG line — RENOVATE_DEFECT, ledger line 6b). Exit code
+      # is not the health signal; the OUTCOME is. anchor==live passes; if they
+      # differ, an open renovate/* bump PR MUST exist or this run goes red.
+      - name: Assert watcher outcome
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          DRY: ${{ inputs.dry_run }}
+        run: bash port/watcher_assert.sh

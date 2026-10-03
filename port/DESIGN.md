@@ -200,7 +200,10 @@ Validated builds are published to a Debian-format apt channel hosted from
 the `gh-pages` branch via GitHub Pages, so users get updates through
 `pkg upgrade` instead of hand-downloading release debs:
 
-    deb [trusted=yes arch=aarch64] https://ytoaa.github.io/termux-firefox-sandbox/apt stable main
+    deb [trusted=yes arch=aarch64] https://ytoaa.github.io/termux-firefox-sandbox stable main
+
+(the apt tree is at the gh-pages branch ROOT; an `/apt` suffix would 404 — the
+publisher replaces dists/ and pool/ at the worktree root and Pages serves "/")
 
 - The `release` CI job publishes it after a fully successful build+gates
   (`port/publish_apt.sh index` regenerates all indices from the complete
@@ -208,9 +211,41 @@ the `gh-pages` branch via GitHub Pages, so users get updates through
 - Selection safety comes from the packaging version lead (above): our deb
   strictly outranks the Termux channel's same-series build, so apt
   resolution prefers the sandbox port automatically.
-- v1 trades: unsigned index (`[trusted=yes]`; apt prints a "No Hash entry"
-  warning that is informational, not an error).  Repo key + InRelease
-  signing is the planned hardening step if/when consumers demand it.
+- v1 trades: unsigned index (`[trusted=yes]`; the "No Hash entry" warning the
+  first channel produced was our own non-canonical Release labels and is
+  fixed — indices now emit MD5Sum/SHA1/SHA256/SHA512 as apt parses them, live-
+  verified 2026-10-02 with a warning-free `apt-get update`).  Repo key +
+  InRelease signing remains the planned hardening step if/when consumers
+  demand it.
 - Proven live on-device with apt `policy` against a file:// instance of the
   generator: candidate resolves to the channel version, installed stays
   untouched.  Harness scenarios [27]-[29] cover index/publish/idempotency.
+
+## Release identity (2026-10-02)
+
+Two publication surfaces, deliberately different lifetimes:
+
+    GitHub Release  = immutable snapshot of ONE (port, Firefox-source) pair
+    APT channel     = cumulative upgrade history (156, 157, future 158 ...)
+
+A GitHub Release tag is `v<port>-ff<firefox-source>` (tag policy lives ONLY
+in `port/make_release.sh`; the workflow never computes tags):
+
+    GitHub Release:  v2.4.7-ff157.0        title: Firefox 157.0 — Sandbox Port 2.4.7
+    its asset:       firefox_157.1-1.2.4.7_aarch64.deb
+
+Why the numbers differ (three coordinates, one build):
+
+- `157.0`  upstream Firefox SOURCE version (goes in the tag; dotted `N.0[.k]`)
+- `157.1`  Debian package-version LEAD = `packaged_version(source)` — the
+  M.(m+1).p lead that keeps our deb ahead of Termux's same-series build
+- `2.4.7`  sandbox port version (revision tail `-1.2.4.7`)
+
+`make_release.sh` cross-checks the deb against (firefox, port): a Firefox
+build can only ever reconcile into its own pair's release (wrong-version
+uploads fail closed, harness [18d]/[18e]).  Release bodies state the
+validation level truthfully: CI-gate wording by default, a "Device level-6
+validated" claim only when `port.toml`'s ledger names exactly that
+(firefox, port) pair.  Legacy note: releases tagged plain `v<port>` predate
+this scheme (`v2.4.7` stays as the historical Firefox 156.0.1 snapshot; its
+body is historical evidence and is never edited).

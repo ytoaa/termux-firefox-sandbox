@@ -45,6 +45,17 @@
 # that calls this script must run the build explicitly via workflow_call with
 # force=true.  Manual human merges still use the push trigger fast path.
 #
+# Truth-state model (10-02 review): `merged` output reflects what LANDED on
+# main, decided the moment `gh pr merge` returns success.  Post-merge
+# verification is a separate observation channel: on verify failure the run
+# still says merged=true (main WAS changed), the candidate loop halts, and
+# the gate exits nonzero so the caller workflow (`if: always()`) still builds
+# the landed version and the heartbeat sees the failure.
+#
+# Exit codes: 0 ok | 2 anchor/live recipe unparsable | 3 candidate listing or
+# main-blob read failed (fail closed, never "no candidates") | 4 escalation
+# write failed | 5 merge landed but post-merge verification failed.
+#
 # Env: DRY_RUN=true  -> evaluate only; no merge, no PR writes.
 #      PR_NUMBER     -> evaluate that single PR (manual dispatch testing).
 #      TERMUX_PACKAGES_SHA -> commit SHA the live recipe was fetched at
@@ -62,6 +73,11 @@ RUN_URL="${GITHUB_SERVER_URL:-https://github.com}/${REPO}/actions/runs/${GITHUB_
 TERMUX_PACKAGES_SHA="${TERMUX_PACKAGES_SHA:-}"
 
 log() { printf '[auto-merge] %s\n' "$*"; }
+# Retry diagnostics go to STDERR only: callers capture stdout as the API
+# payload (`candidates=$(gh_retry ...)`), so a WARN printed on stdout after a
+# failed first attempt would be prepended to the successful payload and
+# corrupt the parse (e.g. candidates containing 'WARN:...' tokens).
+warn() { printf '[auto-merge] %s\n' "$*" >&2; }
 
 # stderr sink for retry diagnostics (never a hardcoded /tmp path: some
 # sandboxes mount it read-only)
@@ -69,6 +85,7 @@ GH_RETRY_ERR="$(mktemp 2>/dev/null || echo "${TMPDIR:-.}/gh_retry_err.$$")"
 
 # Retry a gh call (transient API failures must not masquerade as declines or
 # empty candidate sets — F-10).  Usage: gh_retry <max> -- <args...>
+# SUCCESS PAYLOAD ONLY on stdout; every diagnostic on stderr (see warn()).
 gh_retry() {
   local max="$1"; shift; [ "${1:-}" = "--" ] && shift
   local attempt=1 rc=0 out
@@ -80,7 +97,7 @@ gh_retry() {
       # which silently disabled fail-closed checks in an earlier revision.
       rc=$?
     fi
-    log "WARN: attempt $attempt/$max failed (rc=$rc): $* — $(head -c 200 "$GH_RETRY_ERR" 2>/dev/null)"
+    warn "WARN: attempt $attempt/$max failed (rc=$rc): $* — $(head -c 200 "$GH_RETRY_ERR" 2>/dev/null)"
     attempt=$((attempt+1)); sleep 2
   done
   return "$rc"
@@ -102,11 +119,14 @@ version_lt() {
 
 # sha256 of the anchor file blob at a given ref (content-addressed skip:
 # a PR whose anchor blob already equals main's blob is already landed — F-13).
+# Only a 40-hex sha is accepted: a `null`/error body must not become a
+# comparable value (two failed reads reading as "equal" would skip merges).
 anchor_blob_sha() {
   # -X GET is REQUIRED: gh flips to POST when -f is passed, and POST
   # /repos/*/contents/* is not this call (live-verified 404 class, 09-29).
-  gh_retry 3 -- gh api "repos/${REPO}/contents/${ANCHOR}" -X GET -f ref="$1" 2>/dev/null \
-    | sed -n 's/.*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -n1
+  local sha
+  sha=$(gh_retry 3 -- gh api "repos/${REPO}/contents/${ANCHOR}" -X GET -f ref="$1" --jq .sha 2>/dev/null) || return 1
+  printf '%s' "${sha:-}" | grep -qE '^[0-9a-f]{40}$' && printf '%s' "$sha"
 }
 
 ESCALATION_WRITE_FAILED=0
@@ -165,23 +185,53 @@ accept_merge() {
     return 1
   fi
   log "PR #$pr MERGED (anchor $current -> $proposed @ $headsha)"
-  # Verify what LANDED against the branch ref — never the mutable PR object's
-  # merge_commit_sha (panel evidence: PR #3's merge_commit_sha is orphaned).
-  local main_sha new_anchor
-  main_sha=$(gh_retry 3 -- gh api "repos/${REPO}/branches/main" 2>/dev/null | sed -n 's/.*"sha":[[:space:]]*"\([0-9a-f]\{40\}\)".*/\1/p' | head -n1)
-  new_anchor=$(gh_retry 2 -- gh api "repos/${REPO}/contents/${ANCHOR}" -X GET -f ref=main 2>/dev/null \
-    | sed -n 's/.*"content":[[:space:]]*"\([A-Za-z0-9+/=]*\)".*/\1/p' | head -n1 \
-    | tr -d '\n' | base64 -d 2>/dev/null \
-    | sed -n 's/^termuxFirefoxVersion *= *"\([0-9][0-9.]*\)".*/\1/p' | head -n1)
-  if [ -n "$new_anchor" ] && [ "$new_anchor" != "$proposed" ]; then
-    log "ERROR: post-merge verify FAILED — main anchor '$new_anchor' != expected '$proposed' (main sha ${main_sha:-unknown})"
-    return 2
-  fi
-  log "post-merge verify OK: main=${main_sha:-unknown} anchor=${new_anchor:-$proposed}"
+  # TRUTH STATE FIRST (10-02 review): a successful `gh pr merge` has already
+  # changed main.  MERGED/MERGED_VERSION must record that immediately — NOT
+  # gated on post-verification, which reports on what we OBSERVED, not on
+  # whether the merge happened.  The old order produced false
+  # `merged=false` outputs for a merge that HAD landed (workflow would then
+  # skip the mandatory build of the new main).  Verification failure is
+  # carried separately in POST_MERGE_VERIFY_FAILED (gate still exits nonzero).
   MERGED=1
   MERGED_VERSION="$proposed"
-  # Accept comment AFTER the merge: convenience copy only; the merge commit
-  # message on main is the audit record (C-1).
+  # Verify what LANDED against the branch ref — never the mutable PR object's
+  # merge_commit_sha (panel evidence: PR #3's merge_commit_sha is orphaned).
+  # EVERY element is required (fail-closed): main branch SHA (40 hex), the
+  # contents API read, a decodable content field, a parsed anchor, and
+  # anchor == proposed.  The old `[ -n "$new_anchor" ] && ...` form passed on
+  # an EMPTY read (API/parse failure read as verification success).
+  local main_sha anchor_b64 decoded new_anchor
+  main_sha=$(gh_retry 3 -- gh api "repos/${REPO}/branches/main" --jq .commit.sha) || main_sha=""
+  # --method GET is REQUIRED (gh flips to POST when -f is passed; the POST
+  # contents route is create-file — 403 for our token, live 09-29).
+  anchor_b64=$(gh_retry 3 -- gh api "repos/${REPO}/contents/${ANCHOR}" \
+      --method GET -f ref=main --jq .content) || anchor_b64=""
+  new_anchor=""
+  if [ -n "$anchor_b64" ] && [ "$anchor_b64" != "null" ]; then
+    decoded=$(printf '%s' "$anchor_b64" | tr -d '\n' | base64 -d 2>/dev/null) \
+      && new_anchor=$(printf '%s\n' "$decoded" \
+          | sed -n 's/^termuxFirefoxVersion *= *"\([0-9][0-9.]*\)".*/\1/p' | head -n1)
+  fi
+  if ! printf '%s' "$main_sha" | grep -qE '^[0-9a-f]{40}$'; then
+    log "ERROR: post-merge verify FAILED — main branch SHA unreadable/invalid ('${main_sha:-empty}')"
+    POST_MERGE_VERIFY_FAILED=1
+    return 0
+  fi
+  if [ -z "$new_anchor" ]; then
+    log "ERROR: post-merge verify FAILED — anchor on main unreadable (contents read/decode/parse failed), expected '$proposed' (main sha $main_sha)"
+    POST_MERGE_VERIFY_FAILED=1
+    return 0
+  fi
+  if [ "$new_anchor" != "$proposed" ]; then
+    log "ERROR: post-merge verify FAILED — main anchor '$new_anchor' != expected '$proposed' (main sha $main_sha)"
+    POST_MERGE_VERIFY_FAILED=1
+    return 0
+  fi
+  log "post-merge verify OK: main=${main_sha} anchor=${new_anchor}"
+  # Accept comment AFTER verified merge: convenience copy only; the merge
+  # commit message on main is the audit record (C-1).  Skipped when
+  # verification failed — the accept claim must be verified, while the
+  # merged=true OUTPUT stays truthful about the landed merge.
   if ! gh_retry 2 -- gh pr comment "$pr" --body "AUTO-MERGE-ACCEPT — merged per exception-only policy (single-file anchor bump $current -> $proposed, ${live_note}). Audit record: merge commit message on main. Build runs via workflow_call(force=true). Run: ${RUN_URL}"; then
     log "WARN: accept comment failed (merge succeeded; audit record is the merge commit)"
   fi
@@ -190,6 +240,7 @@ accept_merge() {
 
 MERGED=0
 MERGED_VERSION=""
+POST_MERGE_VERIFY_FAILED=0
 live="$(live_value)"
 if [ -z "$live" ]; then
   log "ERROR: cannot parse TERMUX_PKG_VERSION from live recipe (shape change?)"
@@ -293,6 +344,14 @@ EOF2
     escalate "$pr" "$(IFS='; '; echo "${reasons[*]}")"
   else
     accept_merge "$pr" "$current" "$proposed" "$headsha" "$head_ref" "$nplus" "$nminus" || true
+    # Post-merge verification failed => the state of main is NOT confirmed.
+    # Stop merging further candidates (merged=true already reflects the
+    # landed merge; the gate exits nonzero and the heartbeat sees the run as
+    # failed — while build-after-merge still fires via if: always()).
+    if [ "$POST_MERGE_VERIFY_FAILED" = "1" ]; then
+      log "ERROR: halting candidate loop after post-merge verify failure (PR #$pr merged but main state unverified)"
+      break
+    fi
     # Re-anchor loop state after a successful merge: the local checkout is a
     # stale snapshot, so refresh main-side facts for subsequent candidates
     # (kills the stale-`current` multi-merge window, F-13).
@@ -306,6 +365,11 @@ done
 echo "merged=$([ "$MERGED" = "1" ] && echo true || echo false)" >> "${GITHUB_OUTPUT:-/dev/null}"
 # merged_pr_version is only truthful for a version that actually merged (F-13).
 echo "merged_pr_version=${MERGED_VERSION}" >> "${GITHUB_OUTPUT:-/dev/null}"
+
+if [ "$POST_MERGE_VERIFY_FAILED" = "1" ]; then
+  log "ERROR: a merge landed on main but post-merge verification FAILED — merged=true stands (main WAS changed); the workflow must still build the landed version; investigate why main's anchor read did not confirm"
+  exit 5
+fi
 
 if [ "$ESCALATION_WRITE_FAILED" = "1" ]; then
   log "ERROR: one or more escalation writes failed — exiting nonzero so the heartbeat sees a failed gate run (F-06)"

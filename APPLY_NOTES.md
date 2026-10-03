@@ -1,5 +1,15 @@
 # v2.4.5 — Action r3 (validated)
 
+> Status (2026-10-02): historical validation evidence for the v2.4.5/r3
+> candidate, retained verbatim below — do not treat it as the current release
+> note.  The port has since moved to v2.4.7 (CI-validated release + apt
+> channel, see `port/make_release.sh` / `port/publish_apt.sh` and the
+> `firefox-sandbox.yml` release job).  The maintainer model also changed:
+> Renovate anchor-bump PRs are merged by `port/auto_merge_upstream.sh` under
+> an exception-only policy (five fail-closed checks; humans are touchpoint
+> only for declines), not by per-PR human approval as described here.
+> Device level-6 evidence: see `port/REGRESSION.md` status block.
+
 This tree is based on the device-validated v2.4.4/r2 Action and adds only the
 next isolated compatibility delta.
 

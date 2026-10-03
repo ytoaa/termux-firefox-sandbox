@@ -1,4 +1,18 @@
-# Device regression gate — v2.4.5 / action r3
+# Device regression gate — procedure (last full device pass: v2.4.7 / Firefox 157.0)
+
+> Status (2026-10-02): the procedures below are port-version-agnostic and
+> remain the device acceptance gate.  The header's version anchor records the
+> LAST complete device level-6 re-validation: **v2.4.7 build of Firefox
+> 157.0** (`firefox_157.1-1.2.4.7_aarch64.deb`, package 157.1-1.2.4.7),
+> full device gate PASS 2026-10-02 on the maintainer device — binary gate
+> 4/4, level-6 baseline (tsync, zero SIGSYS/violation/fstatfs), codecs
+> H.264/VP9/AV1/AAC/Opus supported in file+media-source, local sample
+> playback progressing, AudioIPC parent cubeb server with live PulseAudio
+> and zero content-direct pulse connects, level-4 X11 socket path, YouTube
+> streaming playback, clean WebRender GUI rendering.  Evidence:
+> `~/hermes/output/ff-157-evidence/` (device-local; report in
+> `ff-157-device-report.md` there).  Prior pass: v2.4.5/r3, Firefox
+> 156.0.1, 2026-09-14.
 
 This candidate changes two security-relevant paths relative to validated
 v2.4.4: cubeb AudioIPC is restored, and the X11 socket prefix is translated to

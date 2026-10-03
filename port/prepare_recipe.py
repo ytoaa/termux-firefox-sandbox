@@ -161,6 +161,18 @@ def packaged_version(source_version: str) -> str:
     if len(parts) not in (2, 3) or not all(p.isdigit() for p in parts):
         raise RecipeError(f"cannot derive packaged version from {source_version!r}")
     major, minor = parts[0], int(parts[1])
+    # Enforce the lead invariant HERE, not only in ci.sh check-upstream: a
+    # direct invocation of this module (or of raise_package_version) must not
+    # be able to mint a colliding `N.1` lead either.  If upstream ever ships
+    # `M.m.p` with m != 0, the M.(m+1).p scheme can collide with a real
+    # release, so refuse before any recipe is written (mirrors the
+    # fail-closed gate in ci.sh check_upstream; panel/10-02 review item 7).
+    if minor != 0:
+        raise RecipeError(
+            f"invariant violated: source version {source_version!r} has non-zero "
+            "second segment (expected N.0[.k]); the M.(m+1).p packaging lead "
+            "cannot be applied safely — human review required"
+        )
     patch = int(parts[2]) if len(parts) == 3 else 0
     lead = f"{major}.{minor + 1}"
     return lead if patch == 0 else f"{lead}.{patch}"
@@ -181,7 +193,13 @@ def raise_package_version(text: str, source_version: str) -> str:
         return m.group(0).replace("${TERMUX_PKG_VERSION#*really}", source_version)
 
     text = re.sub(r'^TERMUX_PKG_SRCURL=.*$', materialize, text, count=1, flags=re.MULTILINE)
-    if source_version not in text:
+    # Verify containment INSIDE THE SRCURL LINE ITSELF.  A whole-text
+    # containment check is blind here: source_version trivially appears in
+    # the TERMUX_PKG_VERSION line, so an upstream recipe whose SRCURL shape
+    # changed (no longer interpolating the version) would silently publish a
+    # version-lead package pointing at some other source.  Fail closed.
+    src_line = re.search(r"^TERMUX_PKG_SRCURL=.*$", text, re.MULTILINE)
+    if not src_line or source_version not in src_line.group(0):
         raise RecipeError("SRCURL did not materialize to the real source version")
     text = text[: old_line.start()] + f'TERMUX_PKG_VERSION="{target}"' + text[old_line.end():]
     return text
@@ -295,6 +313,11 @@ def main() -> int:
         raise RecipeError("package version lead not applied")
     if "${TERMUX_PKG_VERSION" in (read_scalar(final_build, "TERMUX_PKG_SRCURL") or ""):
         raise RecipeError("SRCURL still interpolates TERMUX_PKG_VERSION after materialization")
+    # Belt-and-braces on the final state: the published recipe must carry the
+    # REAL source version inside its SRCURL (guards the re-run/idempotent
+    # path where raise_package_version early-returns before materializing).
+    if version not in (read_scalar(final_build, "TERMUX_PKG_SRCURL") or ""):
+        raise RecipeError("final SRCURL does not pin the real source version")
     for token in (
         "ac_add_options --enable-sandbox",
         "ac_add_options --disable-forkserver",

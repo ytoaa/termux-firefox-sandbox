@@ -44,12 +44,20 @@ jobs:
       issues: write          # needs-human label
     outputs:
       merged: ${{ steps.evaluate.outputs.merged }}
+      # Exact termux-packages commit the gate EVALUATED against.  Propagated
+      # to build-after-merge so the build consumes the SAME upstream state
+      # the version ground-truth was read from — closing the gate-evaluated-
+      # X-vs-build-pulls-Y TOCTOU (a master move between merge and build
+      # would otherwise ship an un-audited recipe, and the audit tuple in
+      # the merge commit would reference a state the build never used).
+      termux_commit: ${{ steps.live.outputs.termux_commit }}
     steps:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 1
 
       - name: Fetch live Termux recipe (ground truth, commit-pinned)
+        id: live
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -65,10 +73,13 @@ jobs:
             "repos/termux/termux-packages/commits?path=x11-packages/firefox/build.sh&per_page=1" \
             --jq '.[0].sha')
           [ -n "$SHA" ] || { echo "cannot resolve termux-packages commit for recipe path"; exit 1; }
+          printf '%s' "$SHA" | grep -qE '^[0-9a-f]{40}$' \
+            || { echo "resolved termux-packages commit is not a 40-hex SHA: $SHA"; exit 1; }
           curl -fsSL \
             "https://raw.githubusercontent.com/termux/termux-packages/${SHA}/x11-packages/firefox/build.sh" \
             -o /tmp/build.sh
           echo "TERMUX_PACKAGES_SHA=${SHA}" >> "$GITHUB_ENV"
+          echo "termux_commit=${SHA}" >> "$GITHUB_OUTPUT"
 
       - name: Evaluate candidates
         id: evaluate
@@ -83,7 +94,13 @@ jobs:
   build-after-merge:
     name: Build merged upstream bump
     needs: triage
-    if: needs.triage.outputs.merged == 'true' && inputs.dry_run != true
+    # always(): a post-merge-verify failure makes the gate exit nonzero
+    # (5) WHILE merged=true — main HAS changed, so the build of the landed
+    # version is mandatory even though the gate run is red.  Without
+    # always() a verify-failed merge would ship an unbuilt main.
+    # A triage failure BEFORE any merge leaves merged unset -> expression
+    # false -> no build (fail closed).
+    if: always() && needs.triage.outputs.merged == 'true' && inputs.dry_run != true
     # Reusable calls cannot request more than the CALLING job grants, and
     # this workflow's top-level 'permissions: {}' would grant none -> startup
     # error. FIX-3 added a 'release' job in firefox-sandbox.yml requesting
@@ -94,4 +111,8 @@ jobs:
     uses: ./.github/workflows/firefox-sandbox.yml
     with:
       force: true
-      termux_ref: master
+      # Exact commit SHA the gate evaluated against (job output; validated
+      # 40-hex at the source).  NEVER 'master': a mutable ref here would let
+      # Termux move between the gate's evaluation and the build's checkout,
+      # shipping a recipe state that was never audited.
+      termux_ref: ${{ needs.triage.outputs.termux_commit }}

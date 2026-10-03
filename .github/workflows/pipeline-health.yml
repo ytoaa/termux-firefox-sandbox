@@ -5,6 +5,24 @@ name: Pipeline heartbeat
 # Anomalies accumulate as comments on one tracker issue; a clean run
 # comments all-clear and closes it. Labels on the tracker issue reuse
 # needs-human (created only by this workflow; check-2 scans PRs only).
+#
+# 10-02 hardening (panel ruling (c): five surgical items, NO rewrite — the
+# rewrite proposal was rebutted 3/3 because re-testing-the-tested detector with
+# zero CI is the exact mechanism that produced the I-5/I-6 outages):
+#   * per-check crash isolation (guard): one dead check can no longer erase
+#     the other results; a CRASHED check reports itself as MISSING, never green
+#     (F-02 class);
+#   * comment dedup by anomaly signature: recurring lines stay on record on
+#     the open issue instead of re-filing ~3x/day (observed noise);
+#   * self-idle limit 12h -> 8h (a 6h-cron watchdog must notice a skipped slot;
+#     12h silently forgave exactly the 11.3h gap documented 09-28);
+#   * corrected stale comment in check-4 (I-5 outage was 4 consecutive gate
+#     failures plus 2 same-window startup_failures of the later permissions-
+#     ceiling class — full-history recount 10-02);
+#   * check-7 = F-16: GitHub auto-disables schedules at 60d default-branch
+#     inactivity and tags the cause in workflow `state` (disabled_inactivity
+#     per GitHub's own OpenAPI enum) — warn at 45d, flag any disabled workflow.
+#     This was design-only since the 09-28 panel; shipped now.
 on:
   schedule:
     # offset from the 3-hourly Renovate watcher; GitHub schedule is best-effort
@@ -26,7 +44,7 @@ on:
         description: 'Self-liveness threshold in hours (set 0.01 to test the self-stale path)'
         type: string
         required: false
-        default: '12'
+        default: '8'
 
 permissions:
   contents: read
@@ -41,11 +59,11 @@ jobs:
       # sha256[0:16] of port/auto_merge_upstream.sh. Update this constant in
       # the same deliberate change that modifies the gate script — an
       # unaccompanied edit is exactly what this check catches.
-      GATE_HASH_PIN: 06da75c18bc2871f
+      GATE_HASH_PIN: d97d74dc5c451589
       API: ${{ github.api_url }}/repos/${{ github.repository }}
       TOKEN: ${{ secrets.GITHUB_TOKEN }}
       AGE_LIMIT: ${{ inputs.watcher_max_age_h || '8' }}
-      SELF_LIMIT: ${{ inputs.self_idle_max_h || '12' }}
+      SELF_LIMIT: ${{ inputs.self_idle_max_h || '8' }}
       FORCE: ${{ inputs.force_anomaly && '1' || '' }}
     steps:
       - uses: actions/checkout@v4
@@ -78,82 +96,131 @@ jobs:
 
           anom = []
 
+          # Crash isolation (F-02): every check runs guarded. A crashed check
+          # appends an explicit MISSING-result anomaly; it can neither erase
+          # earlier results nor let later checks die silently.
+          def guard(n, fn):
+              try:
+                  fn()
+              except Exception as e:
+                  anom.append(f'FF-HEARTBEAT: check-{n} CRASHED '
+                              f'({type(e).__name__}: {str(e)[:140]}) — this check '
+                              f'produced NO result; do not read as green')
+
           # 1) watcher freshness -> re-dispatch when stale
-          d = req('/actions/workflows/renovate.yml/runs?per_page=5')
-          best = max((r['updated_at'] for r in d.get('workflow_runs', [])
-                      if r.get('status') == 'completed'), default='')
-          if not best:
-              anom.append('FF-HEARTBEAT: no completed watcher run found at all')
-          else:
-              age = (utcnow - parse(best)).total_seconds() / 3600
-              if age > AGE_LIMIT:
-                  try:
-                      req('/actions/workflows/renovate.yml/dispatches',
-                          {'ref': 'main'}, method='POST')
-                      rd = 're-dispatched'
-                  except Exception as e:
-                      rd = f're-dispatch FAILED ({e})'
-                  anom.append(f'FF-HEARTBEAT: watcher stale {age:.1f}h '
-                              f'(limit {AGE_LIMIT}h) — {rd}')
+          def check1():
+              d = req('/actions/workflows/renovate.yml/runs?per_page=5')
+              best = max((r['updated_at'] for r in d.get('workflow_runs', [])
+                          if r.get('status') == 'completed'), default='')
+              if not best:
+                  anom.append('FF-HEARTBEAT: no completed watcher run found at all')
+              else:
+                  age = (utcnow - parse(best)).total_seconds() / 3600
+                  if age > AGE_LIMIT:
+                      try:
+                          req('/actions/workflows/renovate.yml/dispatches',
+                              {'ref': 'main'}, method='POST')
+                          rd = 're-dispatched'
+                      except Exception as e:
+                          rd = f're-dispatch FAILED ({e})'
+                      anom.append(f'FF-HEARTBEAT: watcher stale {age:.1f}h '
+                                  f'(limit {AGE_LIMIT}h) — {rd}')
 
           # 2) gate declines awaiting maintainer decision
-          for p in req('/pulls?state=open&per_page=50'):
-              if 'needs-human' in [l['name'] for l in p.get('labels', [])]:
-                  anom.append(f"FF-HEARTBEAT: PR #{p['number']} needs-human — "
-                              f"{p['title'][:80]} (gate declined; decision needed)")
+          def check2():
+              for p in req('/pulls?state=open&per_page=50'):
+                  if 'needs-human' in [l['name'] for l in p.get('labels', [])]:
+                      anom.append(f"FF-HEARTBEAT: PR #{p['number']} needs-human — "
+                                  f"{p['title'][:80]} (gate declined; decision needed)")
 
           # 3) anchor vs live Termux recipe
-          anch = re.search(r'termuxFirefoxVersion\s*=\s*"([0-9][0-9.]*)"',
-                           open('port/upstream.renovate').read())
-          live_raw = urllib.request.urlopen(
-              'https://raw.githubusercontent.com/termux/termux-packages/master'
-              '/x11-packages/firefox/build.sh', timeout=30).read().decode()
-          live = re.search(r'TERMUX_PKG_VERSION="?([^"\s#]*)"?', live_raw)
-          if not anch or not live:
-              anom.append(f'FF-HEARTBEAT: anchor/live parse FAILED '
-                          f'(anchor={"ok" if anch else "MISS"}, live={"ok" if live else "MISS"})')
-          elif anch.group(1) != live.group(1):
-              anom.append(f'FF-HEARTBEAT: anchor ({anch.group(1)}) != live Termux '
-                          f'recipe ({live.group(1)}) — pending bump or parser drift')
+          def check3():
+              anch = re.search(r'termuxFirefoxVersion\s*=\s*"([0-9][0-9.]*)"',
+                               open('port/upstream.renovate').read())
+              live_raw = urllib.request.urlopen(
+                  'https://raw.githubusercontent.com/termux/termux-packages/master'
+                  '/x11-packages/firefox/build.sh', timeout=30).read().decode()
+              live = re.search(r'TERMUX_PKG_VERSION="?([^"\s#]*)"?', live_raw)
+              if not anch or not live:
+                  anom.append(f'FF-HEARTBEAT: anchor/live parse FAILED '
+                              f'(anchor={"ok" if anch else "MISS"}, live={"ok" if live else "MISS"})')
+              elif anch.group(1) != live.group(1):
+                  anom.append(f'FF-HEARTBEAT: anchor ({anch.group(1)}) != live Termux '
+                              f'recipe ({live.group(1)}) — pending bump or parser drift')
 
-          # 4) pipeline workflow failures in the last 24h.  Scope note (09-29):
-          #    the auto-merge gate and the watcher ARE the build chain's front
-          #    end — the 09-29 outage was 6 consecutive failed gate runs that a
-          #    'Build'-only filter never saw.
-          for r in req('/actions/runs?per_page=20').get('workflow_runs', []):
-              if (r['name'].startswith(('Build', 'Auto-merge', 'Renovate upstream'))
-                      and r.get('conclusion') in ('failure', 'startup_failure')
-                      and utcnow - parse(r['created_at']) <= datetime.timedelta(hours=24)):
-                  anom.append(f"FF-HEARTBEAT: PIPEFAIL-{r['id']} — pipeline workflow "
-                              f"'{r['name']}' failed in last 24h: {r['html_url']}")
+          # 4) pipeline workflow failures in the last 24h.  Scope note (09-29,
+          #    counts corrected 10-02 by full-history recount): the auto-merge
+          #    gate and the watcher ARE the build chain's front end — the 09-29
+          #    outage was 4 consecutive failed gate runs (plus 2 same-window
+          #    workflow_run startup_failures of the later permissions-ceiling
+          #    class) that a 'Build'-only filter never saw.
+          def check4():
+              for r in req('/actions/runs?per_page=20').get('workflow_runs', []):
+                  if (r['name'].startswith(('Build', 'Auto-merge', 'Renovate upstream'))
+                          and r.get('conclusion') in ('failure', 'startup_failure')
+                          and utcnow - parse(r['created_at']) <= datetime.timedelta(hours=24)):
+                      anom.append(f"FF-HEARTBEAT: PIPEFAIL-{r['id']} — pipeline workflow "
+                                  f"'{r['name']}' failed in last 24h: {r['html_url']}")
 
           # 5) gate script drift vs pinned constant
-          ghash = hashlib.sha256(
-              open('port/auto_merge_upstream.sh', 'rb').read()).hexdigest()[:16]
-          pin = os.environ['GATE_HASH_PIN']
-          if ghash != pin:
-              anom.append(f'FF-HEARTBEAT: gate script hash {pin} -> {ghash} — '
-                          f'auto-merge gate CHANGED on main without pin update')
+          def check5():
+              ghash = hashlib.sha256(
+                  open('port/auto_merge_upstream.sh', 'rb').read()).hexdigest()[:16]
+              pin = os.environ['GATE_HASH_PIN']
+              if ghash != pin:
+                  anom.append(f'FF-HEARTBEAT: gate script hash {pin} -> {ghash} — '
+                              f'auto-merge gate CHANGED on main without pin update')
 
           # 6) self-liveness: if THIS watchdog was itself silent for too long,
           #    the GitHub scheduler skipped heartbeat runs — report the gap on
           #    recovery so silence is never invisible (device-independent
           #    replacement for an external canary; blind only until the
           #    scheduler itself comes back).
-          SELF_LIMIT = float(os.environ.get('SELF_LIMIT') or 12)
-          d2 = req('/actions/workflows/pipeline-health.yml/runs?per_page=10&status=completed')
-          prev = max((r['updated_at'] for r in d2.get('workflow_runs', [])
-                      if str(r.get('id')) != os.environ.get('GITHUB_RUN_ID', '')),
-                     default='')
-          if not prev:
-              anom.append('FF-HEARTBEAT: no prior completed pipeline-health run — '
-                          'no self-liveness baseline yet')
-          else:
-              gap = (utcnow - parse(prev)).total_seconds() / 3600
-              if gap > SELF_LIMIT:
-                  anom.append(f'FF-HEARTBEAT: this watchdog itself idle {gap:.1f}h '
-                              f'(limit {SELF_LIMIT}h) — GitHub scheduler skipped '
-                              f'heartbeat runs; checks above cover only from now on')
+          def check6():
+              self_limit = float(os.environ.get('SELF_LIMIT') or 8)
+              d2 = req('/actions/workflows/pipeline-health.yml/runs?per_page=10&status=completed')
+              prev = max((r['updated_at'] for r in d2.get('workflow_runs', [])
+                          if str(r.get('id')) != os.environ.get('GITHUB_RUN_ID', '')),
+                         default='')
+              if not prev:
+                  anom.append('FF-HEARTBEAT: no prior completed pipeline-health run — '
+                              'no self-liveness baseline yet')
+              else:
+                  gap = (utcnow - parse(prev)).total_seconds() / 3600
+                  if gap > self_limit:
+                      anom.append(f'FF-HEARTBEAT: this watchdog itself idle {gap:.1f}h '
+                                  f'(limit {self_limit}h) — GitHub scheduler skipped '
+                                  f'heartbeat runs; checks above cover only from now on')
+
+          # 7) F-16 (design since the 09-28 panel, shipped 10-02): GitHub
+          #    disables scheduled workflows after 60 days of default-branch
+          #    inactivity and TAGS THE CAUSE in the workflow `state` field
+          #    (disabled_inactivity — GitHub's own OpenAPI enum). Warn at 45
+          #    days so the durable tracker carries the prediction BEFORE the
+          #    silence; flag any already-disabled workflow. Needs only reads
+          #    this workflow already holds.
+          def check7():
+              repo = req('')
+              pa = repo.get('pushed_at') or ''
+              if pa:
+                  idle = (utcnow - parse(pa)).total_seconds() / 86400
+                  if idle > 45:
+                      anom.append(f'FF-HEARTBEAT: default branch idle {idle:.0f}d — '
+                                  f'GitHub auto-disables scheduled workflows at 60d; '
+                                  f'watcher+gate+heartbeat schedules will go dark')
+              for w in req('/actions/workflows?per_page=30').get('workflows', []):
+                  st = w.get('state', '')
+                  if st.startswith('disabled'):
+                      anom.append(f"FF-HEARTBEAT: workflow '{w.get('name')}' "
+                                  f"state={st} — its schedule is DISABLED")
+
+          guard(1, check1)
+          guard(2, check2)
+          guard(3, check3)
+          guard(4, check4)
+          guard(5, check5)
+          guard(6, check6)
+          guard(7, check7)
 
           # 0) synthetic injection (dispatch-input testing only)
           if FORCE:
@@ -162,9 +229,6 @@ jobs:
 
           # report
           head = f'## Pipeline heartbeat {utcnow.strftime("%FT%TZ")}\n'
-          body = (f'Auto-generated by `{os.environ["GITHUB_WORKFLOW"]}` run '
-                  f'`{os.environ["GITHUB_RUN_ID"]}`.\n\n'
-                  + '\n'.join(f'- {a}' for a in anom) + '\n')
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
               f.write(head + ('\n'.join(f'- {a}' for a in anom)
                               or '- all checks green') + '\n')
@@ -172,14 +236,48 @@ jobs:
           title = 'FF pipeline heartbeat — pipeline anomalies'
           tr = next((i for i in req('/issues?state=open&per_page=20')
                      if i.get('title', '').startswith('FF pipeline heartbeat')), None)
+
+          # Signature dedup (10-02): recurring anomaly lines are already on the
+          # open tracker issue — re-posting the identical set every cycle was
+          # ~3x noise with zero new information. Post only NEW lines; the issue
+          # stays open while ANY anomaly persists (label-always policy intact).
+          seen = set()
+          if tr:
+              # Include the ISSUE BODY in the seen-set: the anomaly lines an
+              # issue was created with live only in the body; without this the
+              # very next run re-posted them as "new" (dedup blind to its own
+              # opening post).
+              sources = [tr.get('body') or '']
+              for c in req(f"/issues/{tr['number']}/comments?per_page=100"):
+                  sources.append(c.get('body') or '')
+              for body in sources:
+                  for ln in body.splitlines():
+                      ln = ln.strip().lstrip('-').strip()
+                      if ln.startswith('FF-HEARTBEAT:'):
+                          seen.add(ln)
+          fresh = [a for a in anom if a not in seen]
+
           if anom:
-              if tr:
-                  req(f"/issues/{tr['number']}/comments", {'body': body}, method='POST')
-                  print(f'::notice::anomaly reported on tracker issue #{tr["number"]}')
-              else:
+              if not tr:
+                  body = (f'Auto-generated by `{os.environ["GITHUB_WORKFLOW"]}` run '
+                          f'`{os.environ["GITHUB_RUN_ID"]}`.\n\n'
+                          + '\n'.join(f'- {a}' for a in anom) + '\n')
                   i = req('/issues', {'title': title, 'body': body,
                                       'labels': ['needs-human']}, method='POST')
                   print(f'::notice::anomaly tracker issue #{i["number"]} created')
+              elif fresh:
+                  body = (f'Auto-generated by `{os.environ["GITHUB_WORKFLOW"]}` run '
+                          f'`{os.environ["GITHUB_RUN_ID"]}`.\n\n'
+                          + '\n'.join(f'- {a}' for a in fresh)
+                          + (f'\n\n({len(anom) - len(fresh)} recurring anomaly line(s) '
+                             f'already on record — deduped)' if len(anom) > len(fresh) else '')
+                          + '\n')
+                  req(f"/issues/{tr['number']}/comments", {'body': body}, method='POST')
+                  print(f'::notice::anomaly reported on tracker issue #{tr["number"]} '
+                        f'({len(fresh)} new / {len(anom)} total)')
+              else:
+                  print(f'::notice::all {len(anom)} anomalies already on record — '
+                        f'comment deduped; tracker issue #{tr["number"]} stays open')
           else:
               print('all checks green')
               if tr:
