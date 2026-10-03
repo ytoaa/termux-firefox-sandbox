@@ -1,0 +1,97 @@
+name: Auto-merge Renovate upstream bump PRs
+
+# Exception-only maintainer policy: merge Renovate's anchor-bump PRs when the
+# fail-closed checks in port/auto_merge_upstream.sh all pass; escalate
+# anything else with a needs-human comment instead of merging.
+#
+# Triggered by the watcher's completion (workflow_run is the
+# sanctioned chain that bypasses GITHUB_TOKEN event suppression).  The merge
+# itself is performed with GITHUB_TOKEN, which by design does NOT fire the
+# repo's push trigger, so the build is invoked explicitly below via
+# workflow_call(force=true).  Human merges keep using the push fast path.
+
+on:
+  workflow_run:
+    workflows: ["Renovate upstream firefox watcher"]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: 'Evaluate only this PR number (leave empty for auto-discovery)'
+        required: false
+        type: string
+      dry_run:
+        description: 'true = verdict comments only, never merge'
+        required: false
+        type: boolean
+        default: false
+
+permissions: {}
+
+concurrency:
+  group: auto-merge-upstream
+  cancel-in-progress: false
+
+jobs:
+  triage:
+    name: Evaluate & merge anchor bump PRs
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    permissions:
+      contents: write        # merge (GITHUB_TOKEN), read anchor
+      pull-requests: write   # comment + merge
+      issues: write          # needs-human label
+    outputs:
+      merged: ${{ steps.evaluate.outputs.merged }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Fetch live Termux recipe (ground truth, commit-pinned)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Pin the recipe to the last commit that touched it, then fetch raw
+          # AT that commit: the parsed version and the recorded termux-packages
+          # SHA in the audit tuple can never refer to different states.
+          # NOTE: query params must stay in the URL — `gh api -f/--field` flips
+          # the default method to POST, and POST /repos/*/commits is a 404
+          # (live-verified failure, auto-merge runs 2026-09-28..29).
+          SHA=$(gh api \
+            "repos/termux/termux-packages/commits?path=x11-packages/firefox/build.sh&per_page=1" \
+            --jq '.[0].sha')
+          [ -n "$SHA" ] || { echo "cannot resolve termux-packages commit for recipe path"; exit 1; }
+          curl -fsSL \
+            "https://raw.githubusercontent.com/termux/termux-packages/${SHA}/x11-packages/firefox/build.sh" \
+            -o /tmp/build.sh
+          echo "TERMUX_PACKAGES_SHA=${SHA}" >> "$GITHUB_ENV"
+
+      - name: Evaluate candidates
+        id: evaluate
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_NUMBER: ${{ inputs.pr_number }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          TERMUX_PACKAGES_SHA: ${{ env.TERMUX_PACKAGES_SHA }}
+        run: bash port/auto_merge_upstream.sh
+
+  build-after-merge:
+    name: Build merged upstream bump
+    needs: triage
+    if: needs.triage.outputs.merged == 'true' && inputs.dry_run != true
+    # Reusable calls cannot request more than the CALLING job grants, and
+    # this workflow's top-level 'permissions: {}' would grant none -> startup
+    # error. FIX-3 added a 'release' job in firefox-sandbox.yml requesting
+    # contents: write (GitHub release + gh-pages push), so this call must
+    # grant contents: write or every workflow_run chain startup_fails.
+    permissions:
+      contents: write
+    uses: ./.github/workflows/firefox-sandbox.yml
+    with:
+      force: true
+      termux_ref: master

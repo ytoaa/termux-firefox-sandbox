@@ -1,0 +1,343 @@
+name: Build Termux Firefox Native Sandbox Port
+
+on:
+  workflow_call:
+    # Called by auto-merge-upstream.yml after a GITHUB_TOKEN merge (whose
+    # push event is suppressed by GitHub recursion rules).  force=true is
+    # required for dot bumps: the schedule gate alone would classify them
+    # below-threshold.
+    inputs:
+      termux_ref:
+        type: string
+        required: false
+        default: master
+      force:
+        type: boolean
+        required: false
+        default: false
+      release_dry_run:
+        type: boolean
+        required: false
+        default: false
+  workflow_dispatch:
+    inputs:
+      termux_ref:
+        description: termux/termux-packages ref to build
+        required: false
+        default: master
+      force:
+        description: Build even when the Termux Firefox version already matches last_validated_firefox
+        type: boolean
+        required: false
+        default: false
+      release_dry_run:
+        description: Log the release reconciliation without any writes (test path)
+        type: boolean
+        required: false
+        default: false
+  schedule:
+    # Follow upstream Termux: daily check whether the Termux Firefox recipe
+    # version moved past last_validated_firefox.  The expensive build only
+    # runs when it actually did (or on forced manual dispatch).
+    - cron: '0 9 * * *'
+  push:
+    # Human-approval fast path: merging the Renovate PR that updates
+    # port/upstream.renovate means a maintainer approved the new upstream
+    # version, so build it immediately (dots included; the scheduled gate
+    # below-threshold logic otherwise defers dots until the next minor).
+    paths:
+      - port/upstream.renovate
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firefox-native-sandbox-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  TERMUX_BUILDER_IMAGE_NAME: termux-firefox-builder:sccache
+
+jobs:
+  check-upstream:
+    name: Check Termux Firefox upstream version
+    runs-on: ubuntu-26.04
+    timeout-minutes: 10
+    outputs:
+      should_build: ${{ steps.gate.outputs.should_build }}
+      firefox_version: ${{ steps.gate.outputs.firefox_version }}
+    steps:
+      - name: Checkout sandbox port
+        uses: actions/checkout@v7
+        with:
+          path: portrepo
+          fetch-depth: 1
+
+      - name: Fetch Termux Firefox recipe
+        shell: bash
+        run: |
+          set -euxo pipefail
+          ref="${{ inputs.termux_ref || 'master' }}"
+          curl -fsSL \
+            "https://raw.githubusercontent.com/termux/termux-packages/${ref}/x11-packages/firefox/build.sh" \
+            -o /tmp/termux-firefox-build.sh
+
+      - name: Decide whether a rebuild is due
+        id: gate
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash portrepo/port/ci.sh check-upstream \
+            --build-sh /tmp/termux-firefox-build.sh \
+            --port-toml portrepo/port/port.toml \
+            --force "${{ inputs.force || github.event_name == 'push' }}"
+
+  build:
+    name: Firefox native sandbox aarch64
+    needs: check-upstream
+    if: needs.check-upstream.outputs.should_build == 'true'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 355
+    outputs:
+      port_version: ${{ steps.prepare.outputs.port_version }}
+      firefox_version: ${{ steps.prepare.outputs.firefox_version }}
+      termux_commit: ${{ steps.prepare.outputs.termux_commit }}
+
+    steps:
+      - name: Checkout sandbox port
+        uses: actions/checkout@v7
+        with:
+          path: portrepo
+          fetch-depth: 1
+
+      - name: Checkout termux-packages
+        uses: actions/checkout@v7
+        with:
+          repository: termux/termux-packages
+          ref: ${{ inputs.termux_ref }}
+          path: termux-packages
+          fetch-depth: 1
+
+      - name: Validate port tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 -m py_compile \
+            portrepo/port/prepare_recipe.py \
+            portrepo/port/firefox_sandbox_port.py
+          bash -n portrepo/port/ci.sh
+          bash -n portrepo/port/runtime-test.sh
+          python3 - <<'PY'
+          from pathlib import Path
+          import tomllib
+          cfg = tomllib.loads(Path("portrepo/port/port.toml").read_text())
+          assert cfg["port"]["version"]
+          assert cfg["port"]["policy_mode"] == "fail-closed"
+          assert cfg["compatibility"]["runtime_policy_scopes"] == [
+              "Content", "RDD", "Socket", "Utility"
+          ]
+          assert cfg["compatibility"]["x11_socket_subpath"] == "tmp/.X11-unix/X"
+          assert cfg["audioipc"]["require_termux_remoting"] is True
+          assert len(cfg["audioipc"]["required_binary_strings"]) >= 4
+          PY
+
+      - name: Prepare Firefox recipe
+        id: prepare
+        shell: bash
+        run: |
+          set -euxo pipefail
+          python3 portrepo/port/prepare_recipe.py \
+            --firefox-dir termux-packages/x11-packages/firefox \
+            --metadata firefox-port-metadata.json
+
+          termux_commit="$(git -C termux-packages rev-parse HEAD)"
+          python3 - "$termux_commit" <<'PY'
+          import json, sys
+          path = "firefox-port-metadata.json"
+          data = json.load(open(path))
+          data["termux_packages_commit"] = sys.argv[1]
+          open(path, "w").write(json.dumps(data, indent=2, sort_keys=True) + "\n")
+          PY
+
+          python3 - <<'PY' > /tmp/firefox-port-env
+          import json
+          m = json.load(open("firefox-port-metadata.json"))
+          candidate = str(m["candidate"]).lower()
+          print(f"FIREFOX_VERSION={m['firefox_version']}")
+          print(f"FIREFOX_CANDIDATE={candidate}")
+          print(f"PORT_VERSION={m['port_version']}")
+          print(f"CANDIDATE_REASONS={','.join(m.get('candidate_reasons', []))}")
+          PY
+          cat /tmp/firefox-port-env >> "$GITHUB_ENV"
+          candidate="$(grep '^FIREFOX_CANDIDATE=' /tmp/firefox-port-env | cut -d= -f2-)"
+          version="$(grep '^FIREFOX_VERSION=' /tmp/firefox-port-env | cut -d= -f2-)"
+          port_version="$(grep '^PORT_VERSION=' /tmp/firefox-port-env | cut -d= -f2-)"
+          echo "candidate=$candidate" >> "$GITHUB_OUTPUT"
+          echo "firefox_version=$version" >> "$GITHUB_OUTPUT"
+          echo "port_version=$port_version" >> "$GITHUB_OUTPUT"
+          echo "termux_commit=$termux_commit" >> "$GITHUB_OUTPUT"
+
+          cat firefox-port-metadata.json
+          git -C termux-packages diff -- x11-packages/firefox || true
+          git -C termux-packages status --short x11-packages/firefox
+          git -C termux-packages diff -- x11-packages/firefox \
+            > firefox-recipe-changes.diff
+
+      - name: Candidate compatibility notice
+        if: steps.prepare.outputs.candidate == 'true'
+        shell: bash
+        run: |
+          echo "::warning::Unvalidated sandbox candidate: port=${PORT_VERSION} firefox=${FIREFOX_VERSION} reasons=${CANDIDATE_REASONS}"
+          echo "The semantic port will continue, but any changed security contract fails closed."
+
+      - name: Restore Firefox sccache
+        uses: actions/cache/restore@v4
+        with:
+          path: termux-packages/.sccache
+          key: firefox-native-sandbox-semantic-aarch64-v1-${{ github.run_id }}
+          restore-keys: |
+            firefox-native-sandbox-semantic-aarch64-v1-
+            firefox-native-sandbox-sccache-aarch64-v15-
+
+      - name: Prepare Termux zram action workspace
+        shell: bash
+        run: bash portrepo/port/ci.sh prepare-zram-workspace termux-packages
+
+      - name: Enable zram
+        uses: ./termux-packages/.github/actions/zram
+        with:
+          algorithm: zstd
+          size: 16G
+          priority: 100
+          device_name: /dev/zram0
+
+      - name: Prepare Termux builder
+        shell: bash
+        run: bash portrepo/port/ci.sh prepare-builder termux-packages
+
+      - name: Build Firefox
+        id: build-firefox
+        shell: bash
+        run: bash portrepo/port/ci.sh build termux-packages
+
+      - name: Verify AudioIPC binary contract
+        shell: bash
+        run: bash portrepo/port/ci.sh verify-binary termux-packages
+
+      - name: Show sccache statistics
+        if: always()
+        shell: bash
+        run: bash portrepo/port/ci.sh stats termux-packages
+
+      - name: Collect semantic port diagnostics
+        if: always()
+        shell: bash
+        run: bash portrepo/port/ci.sh diagnostics termux-packages
+
+      - name: Save Firefox sccache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: termux-packages/.sccache
+          key: firefox-native-sandbox-semantic-aarch64-v1-${{ github.run_id }}
+
+      - name: Collect Firefox package
+        if: success()
+        shell: bash
+        run: |
+          bash portrepo/port/ci.sh collect \
+            termux-packages \
+            portrepo \
+            firefox-port-metadata.json \
+            firefox-recipe-changes.diff \
+            artifacts
+
+      - name: Upload Firefox native sandbox package
+        if: success()
+        uses: actions/upload-artifact@v6
+        with:
+          name: firefox-native-sandbox-aarch64-v${{ steps.prepare.outputs.port_version }}-ff${{ steps.prepare.outputs.firefox_version }}
+          path: artifacts/
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
+      - name: Upload build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: firefox-native-sandbox-build-diagnostics-v${{ steps.prepare.outputs.port_version }}-ff${{ steps.prepare.outputs.firefox_version }}
+          path: |
+            firefox-port-metadata.json
+            firefox-recipe-changes.diff
+            termux-packages/firefox-build.log
+            termux-packages/firefox-native-sandbox-port-report.json
+            termux-packages/firefox-native-sandbox-binary-gate.json
+            termux-packages/firefox-native-sandbox.generated.patch
+          if-no-files-found: ignore
+          retention-days: 14
+
+      - name: Failure triage summary
+        if: failure()
+        shell: bash
+        run: |
+          set -uo pipefail
+          {
+            echo "## Native sandbox port failure triage"
+            echo ""
+            echo "- firefox=\`${FIREFOX_VERSION:-?}\` candidate=\`${FIREFOX_CANDIDATE:-?}\` reasons=\`${CANDIDATE_REASONS:-none}\`"
+            echo ""
+            echo '```'
+            grep -hE "PORT ERROR|RECIPE ERROR|anchor changed|contract changed|verification missing|VERIFY SUCCESS|undefined symbol|ld\\.lld: error|Hunk.*FAILED" \
+              termux-packages/firefox-build.log \
+              termux-packages/firefox-native-sandbox-port-report.json 2>/dev/null | tail -n 60 || true
+            sed -n 's/^  *"error": "\(.*\)"$/\1/p' \
+              termux-packages/firefox-native-sandbox-port-report.json 2>/dev/null || true
+            echo '```'
+            echo ""
+            echo "Full evidence: the diagnostics artifact for this run."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  release:
+    name: Publish validated release
+    needs: build
+    # Only a FULLY successful build+gates reaches users as a release.
+    if: needs.build.result == 'success'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    # Job-level write overrides the workflow-level read; a workflow_call run
+    # is capped by the caller job's permissions (auto-merge triage already
+    # grants contents: write, so the ceiling holds).
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Download validated package
+        uses: actions/download-artifact@v6
+        with:
+          name: firefox-native-sandbox-aarch64-v${{ needs.build.outputs.port_version }}-ff${{ needs.build.outputs.firefox_version }}
+          path: pkg
+          if-no-files-found: error
+
+      - name: Reconcile GitHub release (idempotent, read-back verified)
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          GIT_SHA: ${{ github.sha }}
+          DRY_RUN: ${{ inputs.release_dry_run && 'true' || 'false' }}
+        run: bash port/make_release.sh pkg "${{ needs.build.outputs.port_version }}" "${{ needs.build.outputs.firefox_version }}" "${{ needs.build.outputs.termux_commit }}"
+
+      - name: Publish apt channel (GitHub Pages)
+        # Same gate as the release: validated builds only; skipped on dry-run.
+        # Users add: deb [trusted=yes arch=aarch64]
+        #   https://ytoaa.github.io/termux-firefox-sandbox/apt stable main
+        if: inputs.release_dry_run != true
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash port/publish_apt.sh index pkg "$RUNNER_TEMP/aptrepo" stable aarch64
+          bash port/publish_apt.sh publish "$RUNNER_TEMP/aptrepo" gh-pages origin

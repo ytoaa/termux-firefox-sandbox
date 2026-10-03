@@ -1,0 +1,42 @@
+[port]
+version = "2.4.7"
+last_validated_port = "2.4.7"
+last_validated_firefox = "156.0.1"
+# Rebuild trigger: minor (0.1-level) segment movement from the schedule only;
+# revision and source-hash drift are reported in the gate summary without
+# scheduling a build (the M.(m+1).p package-version lead keeps installs safe
+# through dots, and dot security fixes reach users via the Renovate watcher's
+# approval PR whose merge runs the gate forced).
+last_validated_revision = "0"
+last_validated_srcsha256 = "f8b0bf733efebebf9af98ead537598c2cf56c2c1b9c06bf89220ea6731b64724"
+policy_mode = "fail-closed"
+
+[termux]
+package = "x11-packages/firefox"
+prefix_placeholder = "@TERMUX_PREFIX@"
+
+[compatibility]
+# These are the process policies that intentionally receive the Termux
+# equivalents of Linux /usr/lib, /etc and /usr/share, read-only only.
+runtime_policy_scopes = ["Content", "RDD", "Socket", "Utility"]
+runtime_read_subdirs = ["lib", "etc", "share"]
+content_android_read_paths = ["/system/fonts"]
+x11_socket_subpath = "tmp/.X11-unix/X"
+
+[audioipc]
+# Termux's stock 0008-fix-macros.patch disables MOZ_CUBEB_REMOTING even though
+# the package otherwise identifies as XP_LINUX.  The sandbox port restores the
+# upstream Linux AudioIPC model; Content must not receive a direct PulseAudio
+# MAY_CONNECT bypass.
+require_termux_remoting = true
+required_binary_strings = [
+  "Starting cubeb server...",
+  "audioipc_server_start failed",
+  "SendCreateAudioIPCConnection failed: invalid FD",
+  "audioipc_server_new_client failed",
+]
+
+[regression]
+content_sandbox_level = 6
+required_media_codecs = ["h264", "vp9", "av1", "aac", "opus"]
+require_audioipc = true

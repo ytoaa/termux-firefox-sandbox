@@ -1,0 +1,11 @@
+# Upstream Termux Firefox version — watched by Renovate (config: /renovate.json).
+#
+# Role: detection ledger + human-merge approval surface.  When the live Termux
+# recipe (x11-packages/firefox/build.sh) moves, Renovate opens a PR updating
+# the value below.  Merging that PR is the human approval that fires the
+# gated build immediately (push trigger on this file in
+# .github/workflows/firefox-sandbox.yml).
+#
+# The check-upstream gate still reads the live recipe as its ground truth;
+# this file is not consumed by the build itself.
+termuxFirefoxVersion = "156.0.1"

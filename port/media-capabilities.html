@@ -1,0 +1,35 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Firefox Termux media capability regression</title>
+<style>
+  body { font: 14px system-ui, sans-serif; margin: 2rem; }
+  pre { white-space: pre-wrap; }
+</style>
+<h1>Firefox Termux media capability regression</h1>
+<p>Run once after startup, wait for Utility/RDD initialization, then reload once.</p>
+<pre id="out">running…</pre>
+<script>
+(async () => {
+  const out = document.querySelector('#out');
+  const cases = [
+    ['H264 video only', {video: {contentType:'video/mp4; codecs="avc1.42E01E"', width:1920, height:1080, bitrate:5_000_000, framerate:30}}],
+    ['VP9 video only',  {video: {contentType:'video/webm; codecs="vp09.00.10.08"', width:1920, height:1080, bitrate:5_000_000, framerate:30}}],
+    ['AV1 video only',  {video: {contentType:'video/mp4; codecs="av01.0.05M.08"', width:1920, height:1080, bitrate:5_000_000, framerate:30}}],
+    ['AAC audio only',  {audio: {contentType:'audio/mp4; codecs="mp4a.40.2"', channels:2, bitrate:128000, samplerate:48000}}],
+    ['Opus audio only', {audio: {contentType:'audio/webm; codecs="opus"', channels:2, bitrate:128000, samplerate:48000}}],
+  ];
+  const lines = [];
+  for (const type of ['file', 'media-source']) {
+    lines.push(`===== ${type} =====`, '');
+    for (const [name, config] of cases) {
+      try {
+        const result = await navigator.mediaCapabilities.decodingInfo({type, ...config});
+        lines.push(name, JSON.stringify(result), '');
+      } catch (e) {
+        lines.push(name, `ERROR: ${e}`, '');
+      }
+    }
+  }
+  out.textContent = lines.join('\n');
+})();
+</script>

@@ -1,0 +1,190 @@
+name: Pipeline heartbeat
+# GitHub-side watchdog for the auto-merge pipeline. Primary monitoring lives
+# HERE (device-independent, version-controlled); the maintainer device keeps
+# only a thin canary that checks THIS workflow itself still runs.
+# Anomalies accumulate as comments on one tracker issue; a clean run
+# comments all-clear and closes it. Labels on the tracker issue reuse
+# needs-human (created only by this workflow; check-2 scans PRs only).
+on:
+  schedule:
+    # offset from the 3-hourly Renovate watcher; GitHub schedule is best-effort
+    # on this repo (observed skips 2.4-6.3h), so thresholds assume that.
+    - cron: '25 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      watcher_max_age_h:
+        description: 'Watcher staleness threshold in hours (set 0.01 to test the stale path)'
+        type: string
+        required: false
+        default: '8'
+      force_anomaly:
+        description: 'Inject a synthetic anomaly to exercise the tracker-issue path'
+        type: boolean
+        required: false
+        default: false
+      self_idle_max_h:
+        description: 'Self-liveness threshold in hours (set 0.01 to test the self-stale path)'
+        type: string
+        required: false
+        default: '12'
+
+permissions:
+  contents: read
+  actions: write   # write (not read) so the stale-path REST dispatches call can re-trigger the watcher
+  issues: write
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      # sha256[0:16] of port/auto_merge_upstream.sh. Update this constant in
+      # the same deliberate change that modifies the gate script — an
+      # unaccompanied edit is exactly what this check catches.
+      GATE_HASH_PIN: 06da75c18bc2871f
+      API: ${{ github.api_url }}/repos/${{ github.repository }}
+      TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      AGE_LIMIT: ${{ inputs.watcher_max_age_h || '8' }}
+      SELF_LIMIT: ${{ inputs.self_idle_max_h || '12' }}
+      FORCE: ${{ inputs.force_anomaly && '1' || '' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: health checks
+        run: |
+          python3 - <<'PYEOF'
+          import json, os, re, hashlib, datetime, urllib.request
+
+          API = os.environ['API']
+          TOK = os.environ['TOKEN']
+          AGE_LIMIT = float(os.environ.get('AGE_LIMIT') or 8)
+          FORCE = os.environ.get('FORCE') == '1'
+          # assembled at runtime; keep source split (hostile-masking convention)
+          H = {'Auth' + 'orization': 'Bear' + 'er ' + TOK,
+               'Accept': 'application/vnd.github+json',
+               'Content-Type': 'application/json'}
+          utcnow = datetime.datetime.now(datetime.timezone.utc)
+
+          def req(path, body=None, method='GET'):
+              data = json.dumps(body).encode() if body is not None else None
+              r = urllib.request.Request(API + path, data=data, headers=H,
+                                         method='POST' if method == 'POST' and data else
+                                         'PATCH' if method == 'PATCH' else None)
+              raw = urllib.request.urlopen(r, timeout=30).read()
+              return json.loads(raw) if raw else {}
+
+          def parse(ts):
+              return datetime.datetime.strptime(ts, '%Y-%m-%dT%H:%M:%SZ').replace(
+                  tzinfo=datetime.timezone.utc)
+
+          anom = []
+
+          # 1) watcher freshness -> re-dispatch when stale
+          d = req('/actions/workflows/renovate.yml/runs?per_page=5')
+          best = max((r['updated_at'] for r in d.get('workflow_runs', [])
+                      if r.get('status') == 'completed'), default='')
+          if not best:
+              anom.append('FF-HEARTBEAT: no completed watcher run found at all')
+          else:
+              age = (utcnow - parse(best)).total_seconds() / 3600
+              if age > AGE_LIMIT:
+                  try:
+                      req('/actions/workflows/renovate.yml/dispatches',
+                          {'ref': 'main'}, method='POST')
+                      rd = 're-dispatched'
+                  except Exception as e:
+                      rd = f're-dispatch FAILED ({e})'
+                  anom.append(f'FF-HEARTBEAT: watcher stale {age:.1f}h '
+                              f'(limit {AGE_LIMIT}h) — {rd}')
+
+          # 2) gate declines awaiting maintainer decision
+          for p in req('/pulls?state=open&per_page=50'):
+              if 'needs-human' in [l['name'] for l in p.get('labels', [])]:
+                  anom.append(f"FF-HEARTBEAT: PR #{p['number']} needs-human — "
+                              f"{p['title'][:80]} (gate declined; decision needed)")
+
+          # 3) anchor vs live Termux recipe
+          anch = re.search(r'termuxFirefoxVersion\s*=\s*"([0-9][0-9.]*)"',
+                           open('port/upstream.renovate').read())
+          live_raw = urllib.request.urlopen(
+              'https://raw.githubusercontent.com/termux/termux-packages/master'
+              '/x11-packages/firefox/build.sh', timeout=30).read().decode()
+          live = re.search(r'TERMUX_PKG_VERSION="?([^"\s#]*)"?', live_raw)
+          if not anch or not live:
+              anom.append(f'FF-HEARTBEAT: anchor/live parse FAILED '
+                          f'(anchor={"ok" if anch else "MISS"}, live={"ok" if live else "MISS"})')
+          elif anch.group(1) != live.group(1):
+              anom.append(f'FF-HEARTBEAT: anchor ({anch.group(1)}) != live Termux '
+                          f'recipe ({live.group(1)}) — pending bump or parser drift')
+
+          # 4) pipeline workflow failures in the last 24h.  Scope note (09-29):
+          #    the auto-merge gate and the watcher ARE the build chain's front
+          #    end — the 09-29 outage was 6 consecutive failed gate runs that a
+          #    'Build'-only filter never saw.
+          for r in req('/actions/runs?per_page=20').get('workflow_runs', []):
+              if (r['name'].startswith(('Build', 'Auto-merge', 'Renovate upstream'))
+                      and r.get('conclusion') in ('failure', 'startup_failure')
+                      and utcnow - parse(r['created_at']) <= datetime.timedelta(hours=24)):
+                  anom.append(f"FF-HEARTBEAT: PIPEFAIL-{r['id']} — pipeline workflow "
+                              f"'{r['name']}' failed in last 24h: {r['html_url']}")
+
+          # 5) gate script drift vs pinned constant
+          ghash = hashlib.sha256(
+              open('port/auto_merge_upstream.sh', 'rb').read()).hexdigest()[:16]
+          pin = os.environ['GATE_HASH_PIN']
+          if ghash != pin:
+              anom.append(f'FF-HEARTBEAT: gate script hash {pin} -> {ghash} — '
+                          f'auto-merge gate CHANGED on main without pin update')
+
+          # 6) self-liveness: if THIS watchdog was itself silent for too long,
+          #    the GitHub scheduler skipped heartbeat runs — report the gap on
+          #    recovery so silence is never invisible (device-independent
+          #    replacement for an external canary; blind only until the
+          #    scheduler itself comes back).
+          SELF_LIMIT = float(os.environ.get('SELF_LIMIT') or 12)
+          d2 = req('/actions/workflows/pipeline-health.yml/runs?per_page=10&status=completed')
+          prev = max((r['updated_at'] for r in d2.get('workflow_runs', [])
+                      if str(r.get('id')) != os.environ.get('GITHUB_RUN_ID', '')),
+                     default='')
+          if not prev:
+              anom.append('FF-HEARTBEAT: no prior completed pipeline-health run — '
+                          'no self-liveness baseline yet')
+          else:
+              gap = (utcnow - parse(prev)).total_seconds() / 3600
+              if gap > SELF_LIMIT:
+                  anom.append(f'FF-HEARTBEAT: this watchdog itself idle {gap:.1f}h '
+                              f'(limit {SELF_LIMIT}h) — GitHub scheduler skipped '
+                              f'heartbeat runs; checks above cover only from now on')
+
+          # 0) synthetic injection (dispatch-input testing only)
+          if FORCE:
+              anom.append('FF-HEARTBEAT: SYNTHETIC force_anomaly injection '
+                          '(test path, no real fault)')
+
+          # report
+          head = f'## Pipeline heartbeat {utcnow.strftime("%FT%TZ")}\n'
+          body = (f'Auto-generated by `{os.environ["GITHUB_WORKFLOW"]}` run '
+                  f'`{os.environ["GITHUB_RUN_ID"]}`.\n\n'
+                  + '\n'.join(f'- {a}' for a in anom) + '\n')
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
+              f.write(head + ('\n'.join(f'- {a}' for a in anom)
+                              or '- all checks green') + '\n')
+
+          title = 'FF pipeline heartbeat — pipeline anomalies'
+          tr = next((i for i in req('/issues?state=open&per_page=20')
+                     if i.get('title', '').startswith('FF pipeline heartbeat')), None)
+          if anom:
+              if tr:
+                  req(f"/issues/{tr['number']}/comments", {'body': body}, method='POST')
+                  print(f'::notice::anomaly reported on tracker issue #{tr["number"]}')
+              else:
+                  i = req('/issues', {'title': title, 'body': body,
+                                      'labels': ['needs-human']}, method='POST')
+                  print(f'::notice::anomaly tracker issue #{i["number"]} created')
+          else:
+              print('all checks green')
+              if tr:
+                  req(f"/issues/{tr['number']}/comments",
+                      {'body': 'All checks green — auto-closing.'}, method='POST')
+                  req(f"/issues/{tr['number']}", {'state': 'closed'}, method='PATCH')
+                  print(f'::notice::tracker issue #{tr["number"]} cleared and closed')
+          PYEOF

@@ -1,0 +1,64 @@
+name: Renovate upstream firefox watcher
+
+# Runs ON GITHUB RUNNERS only; executes nothing on developer devices.
+# Every 3 hours Renovate fetches the live Termux firefox recipe and, if its
+# TERMUX_PKG_VERSION moved past port/upstream.renovate, opens an update PR.
+# Merging that PR triggers the gated build via the push trigger in
+# firefox-sandbox.yml.  The daily schedule trigger there remains the safety
+# net if this watcher ever stalls.
+#
+# Cadence rationale (09-29): the downstream gate+build runs >1h and is fully
+# serialized (gate group auto-merge-upstream; build group
+# firefox-native-sandbox-<ref>, both cancel-in-progress: false), so sub-3h
+# detection adds runner churn without moving the merge->build start earlier.
+# GitHub's scheduler also stretches this repo's schedules to 2.4-8.6h in
+# practice; 3h aligns the declared intent with the observed reality.  The
+# pipeline-heartbeat re-dispatch (>8h stale) still bounds worst-case latency.
+# Offset 17 past the hour avoids the :00 schedule congestion window.
+
+on:
+  schedule:
+    - cron: '17 */3 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'full = log-only dry run, no PRs'
+        type: choice
+        required: false
+        default: 'null'
+        options: ['null', 'full', 'lookup']
+      log_level:
+        description: 'Renovate LOG_LEVEL'
+        type: choice
+        required: false
+        default: 'info'
+        options: ['info', 'debug']
+
+permissions: {}
+
+concurrency:
+  group: renovate-upstream-watcher
+  cancel-in-progress: true
+
+jobs:
+  renovate:
+    name: Check Termux firefox recipe
+    runs-on: ubuntu-26.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 1
+
+      - name: Renovate
+        uses: renovatebot/github-action@v46.3.4
+        env:
+          RENOVATE_REPOSITORIES: ${{ github.repository }}
+          LOG_LEVEL: ${{ inputs.log_level || 'info' }}
+          RENOVATE_DRY_RUN: ${{ inputs.dry_run }}
+        with:
+          configurationFile: renovate.json
+          token: ${{ secrets.GITHUB_TOKEN }}
