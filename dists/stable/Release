@@ -1,0 +1,21 @@
+Origin: ytoaa/termux-firefox-sandbox (apt channel)
+Label: Termux Firefox sandbox port
+Suite: stable
+Codename: stable
+Version: 2026-10-02
+Date: Fri, 02 Oct 2026 15:14:50 +0000
+Architectures: aarch64
+Components: main
+Description: Validated sandbox-port Firefox builds (version-lead scheme)
+MD5Sum:
+ 110db40213b2237e7eb4baaa15d375d0 1545 main/binary-aarch64/Packages
+ d96c6f34b894ff8ed6b487f7a6dc29cc 627 main/binary-aarch64/Packages.gz
+SHA1:
+ feffb07322487735fc97a558e1c440a3fcf449bd 1545 main/binary-aarch64/Packages
+ f3d206e4ce78cda7b4b7c7487ae78deebe8bac15 627 main/binary-aarch64/Packages.gz
+SHA256:
+ 0fe5aed78ab21552f18642bb321520f087d1d21f853e8789e9be89801ac7f003 1545 main/binary-aarch64/Packages
+ 0bf7d889cd3cc95a781a1467c11f82272f66b95929590bb56f48b6b5c75d541e 627 main/binary-aarch64/Packages.gz
+SHA512:
+ ce80c044ab243e98be54b6976513f4fa46458b46c6145012f14a7fed07c82742a90da4fe5eb50c432dbb41b6dcf04f4b606bffa1cbf0e212a9ce90cab0115ca7 1545 main/binary-aarch64/Packages
+ d175d57507cc33cd75b773853c8f4c44e3f44a3edfb2175febea6766d72e0950e3d8563e086c2f97fdfe18761ec283e94ef772da5d8b733d3ad58bf72b775ce1 627 main/binary-aarch64/Packages.gz
