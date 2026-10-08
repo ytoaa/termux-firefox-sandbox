@@ -25,3 +25,17 @@ Size: 68884728
 MD5sum: 954a37640f9b4eeacdeaad32ad57a420
 SHA1: a9a9adfcccd3a4511c78cd7f08f1b06e3c1b3ad7
 SHA256: db379e7ee3a0aefc93a1c8e396a11fa92a1c5fe2c619ef9f570129911999b0f4
+
+Package: firefox
+Architecture: aarch64
+Installed-Size: 282132
+Maintainer: @termux
+Version: 157.1.1-1.2.4.7
+Homepage: https://www.mozilla.org/firefox
+Depends: ffmpeg, fontconfig, freetype, gdk-pixbuf, glib, gtk3, libandroid-shmem, libandroid-glob, libandroid-spawn, libc++, libcairo, libevent, libffi, libice, libicu, libjpeg-turbo, libnspr, libnss, libpixman, libsm, libvpx, libwebp, libx11, libxcb, libxcomposite, libxdamage, libxext, libxfixes, libxrandr, libxtst, pango, pulseaudio, zlib
+Description: Mozilla Firefox web browser
+Filename: pool/main/f/firefox/firefox_157.1.1-1.2.4.7_aarch64.deb
+Size: 68887168
+MD5sum: 706c71b4f63544daa567ae7fbf00937d
+SHA1: 34d147189fef1c830b1eebd208ebdcc3c56902f3
+SHA256: 9fa791c304a3f4040b4f5a5a292304d490c1c57e27dd5832d13bb2e4b65f9a81
