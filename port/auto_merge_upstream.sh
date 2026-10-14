@@ -8,13 +8,15 @@
 #
 # Fail-closed checks (all required for accept):
 #   1. head branch matches ^renovate/termux-firefox-upstream-
-#   2. PR head is the SAME repository as base (head.repo.full_name ==
-#      base.repo.full_name) and author_association is OWNER or MEMBER.
-#      Renovate runs with GITHUB_TOKEN, so legit bump PRs are same-repo with
-#      author_association=OWNER (live-verified PRs #1/#3).  Do NOT use
-#      isCrossRepository: the key is absent on this repo's PR responses and
-#      jq's `null == false` is false, which would silently drop every legit
-#      PR (panel struck-claim (g), 2026-09-28).
+#   2. PR head and base are the SAME repository and the PR creator is
+#      exactly github-actions[bot] with type Bot.
+#      author_association is deliberately NOT a trust input: same-repo PRs
+#      created by this repository's GITHUB_TOKEN have been observed as NONE
+#      and CONTRIBUTOR.  Trust instead comes from exact bot identity +
+#      same-repo provenance + the content/live-version/head-SHA checks below.
+#      Do NOT use isCrossRepository: the key is absent on this repo's PR
+#      responses and jq's `null == false` is false, which would silently drop
+#      every legit PR (panel struck-claim (g), 2026-09-28).
 #   3. PR changes exactly one file: port/upstream.renovate
 #   4. the proposed termuxFirefoxVersion parses as N[.0[.k]]
 #   5. proposed == TERMUX_PKG_VERSION in the LIVE Termux recipe (ground truth,
@@ -151,7 +153,7 @@ escalate() {
     log "PR #$pr already has an escalation comment; skipping duplicate (label still enforced)"
   elif ! gh_retry 3 -- gh pr comment "$pr" --body "**$ESCALATION_MARKER** — auto-merge gate declined this PR. Reasons: $reasons.
 
-Leaving this PR open for maintainer decision. Checks applied: same-repo identity + association, branch pattern, single-file diff, live-recipe match, forward bump, N.1 invariant. See port/auto_merge_upstream.sh. Run: ${RUN_URL}"; then
+Leaving this PR open for maintainer decision. Checks applied: same-repo bot identity, branch pattern, single-file diff, live-recipe match, forward bump, N.1 invariant. See port/auto_merge_upstream.sh. Run: ${RUN_URL}"; then
     log "ERROR: escalation comment failed for PR #$pr (label attempted separately)"
     rc=1
   fi
@@ -275,8 +277,10 @@ fi
 
 for pr in $candidates; do
   # Single round-trip for all identity/atomicity facts (F-01/F-04).
-  read -r head_ref headsha head_full base_full assoc <<EOF2
-$(gh_retry 3 -- gh api "repos/${REPO}/pulls/${pr}" --jq '[.head.ref, .head.sha, .head.repo.full_name, .base.repo.full_name, .author_association] | join(" ")')
+  # author_association is captured for diagnostics only; it is not stable for
+  # GITHUB_TOKEN-created same-repo PRs and therefore is not an authority bit.
+  read -r head_ref headsha head_full base_full actor_login actor_type assoc <<EOF2
+$(gh_retry 3 -- gh api "repos/${REPO}/pulls/${pr}" --jq '[.head.ref, .head.sha, .head.repo.full_name, .base.repo.full_name, .user.login, .user.type, .author_association] | join(" ")')
 EOF2
   if [ -z "${head_ref:-}" ] || [ -z "${headsha:-}" ]; then
     log "ERROR: PR #$pr metadata read failed after retries (not treating as no-candidate)"
@@ -288,11 +292,16 @@ EOF2
 
   [[ "$head_ref" =~ ^renovate/termux-firefox-upstream- ]] || reasons+=("branch-not-renovate-pattern:$head_ref")
 
-  # Identity: same-repo + OWNER/MEMBER association.  Never labels, never
-  # author.login (GITHUB_TOKEN PRs are authored by the repo owner).
+  # Identity: exact repository-owned Actions bot + same-repo head/base.
+  # author_association is informational only: live GITHUB_TOKEN-created PRs
+  # have appeared as NONE/CONTRIBUTOR.  The exact diff/live-version/head-SHA
+  # checks below still make this fail closed.
   [ "$head_full" = "$REPO" ] || reasons+=("head-repo-not-same-repo:$head_full")
   [ "$base_full" = "$REPO" ] || reasons+=("base-repo-unexpected:$base_full")
-  case "$assoc" in OWNER|MEMBER) ;; *) reasons+=("author-association-not-trusted:$assoc");; esac
+  if [ "$actor_login" != "github-actions[bot]" ] || [ "$actor_type" != "Bot" ]; then
+    reasons+=("pr-author-not-trusted:${actor_login:-missing}/${actor_type:-missing}")
+  fi
+  log "PR #$pr identity: actor=${actor_login:-missing}/${actor_type:-missing} association=${assoc:-missing} (association informational only)"
 
   # Content-addressed already-landed skip (F-13): head anchor blob identical
   # to main's => merging would be a no-op with a lying audit record.

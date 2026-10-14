@@ -56,6 +56,37 @@ jobs:
         with:
           fetch-depth: 1
 
+      # Renovate runs under this repository's GITHUB_TOKEN. PR events caused
+      # by that token are not a reliable enforcement point: GitHub may suppress
+      # the child workflow or surface action_required with zero jobs.
+      # workflow_run is already the recursion-safe chain, so the same harness
+      # runs here before any merge authority is used.
+      - name: Pre-merge harness (authoritative for Renovate bot PRs)
+        shell: bash
+        run: |
+          set -euo pipefail
+          find port -name '*.sh' -print0 | xargs -0 -n1 bash -n
+          python3 -m py_compile port/prepare_recipe.py port/firefox_sandbox_port.py
+          python3 - <<'PY'
+          import glob, sys
+          try:
+              import yaml
+          except ImportError:
+              print("PyYAML unavailable on runner — structural greps still run in the harness")
+              sys.exit(0)
+          bad = []
+          for p in sorted(glob.glob(".github/workflows/*.yml")):
+              try:
+                  yaml.safe_load(open(p))
+              except Exception as e:
+                  bad.append(f"{p}: {e}")
+          if bad:
+              print("\n".join(bad), file=sys.stderr)
+              sys.exit(1)
+          print(f"YAML parse OK: {len(glob.glob('.github/workflows/*.yml'))} workflows")
+          PY
+          bash port/tests/run_tests.sh
+
       - name: Fetch live Termux recipe (ground truth, commit-pinned)
         id: live
         shell: bash

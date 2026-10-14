@@ -128,7 +128,7 @@ PY
   fi
   notes=$(mktemp)
   {
-    echo "Firefox **${FIREFOX_VERSION}** (upstream source) on sandbox port **${PORT_VERSION}** — this release is the immutable snapshot of exactly this (port, Firefox) pair; its deb is the only build it carries."
+    echo "Firefox **${FIREFOX_VERSION}** (upstream source) on sandbox port **${PORT_VERSION}** — this release is the versioned identity snapshot for exactly this (port, Firefox) pair; its deb is the only build it carries."
     echo
     echo "- package: \`${deb_name}\`  (Debian version = package-version lead \`${lead}\` + revision ending in the port version \`${PORT_VERSION}\`; the lead intentionally differs from the source version \`${FIREFOX_VERSION}\` — see port/DESIGN.md 'Release identity')"
     echo "- sha256: \`${local_digest}\`"

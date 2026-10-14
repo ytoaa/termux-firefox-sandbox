@@ -160,10 +160,13 @@ STUB
 sed -i "s|@@WORK@@|$WORK|" "$WORK/bin/gh"
 chmod +x "$WORK/bin/gh"
 
-mk_pr_json() { # head_ref head_sha head_repo association
+mk_pr_json() { # head_ref head_sha head_repo association [actor_login] [actor_type]
+  local actor="${5:-github-actions[bot]}" actor_type="${6:-Bot}"
   jq -n --arg ref "$1" --arg sha "$2" --arg repo "$3" --arg assoc "$4" \
+    --arg actor "$actor" --arg actor_type "$actor_type" \
     '{head:{ref:$ref, sha:$sha, repo:{full_name:$repo}},
       base:{ref:"main", repo:{full_name:"ytoaa/termux-firefox-sandbox"}},
+      user:{login:$actor, type:$actor_type},
       author_association:$assoc}' -c > "$WORK/fixtures/pr.json"
 }
 mk_diff() { printf -- '--- a/port/upstream.renovate\n+++ b/port/upstream.renovate\n@@ -1 +1 @@\n-termuxFirefoxVersion = "156.0"\n+termuxFirefoxVersion = "%s"\n' "$1" > "$WORK/fixtures/diff"; }
@@ -205,11 +208,11 @@ expect() { # desc, cmd...
 }
 contains() { grep -q -- "$1" "$2"; }
 absent() { ! grep -q -- "$1" "$2"; }
-good_pr() { mk_pr_json "renovate/termux-firefox-upstream-156" "$SHA_A" "ytoaa/termux-firefox-sandbox" "OWNER"; }
+good_pr() { mk_pr_json "renovate/termux-firefox-upstream-156" "$SHA_A" "ytoaa/termux-firefox-sandbox" "CONTRIBUTOR"; }
 
 echo "== FIX-1 gate harness =="
 
-echo "[1] accept: same-repo OWNER, valid forward bump"
+echo "[1] accept: same-repo github-actions bot, CONTRIBUTOR association, valid forward bump"
 reset_env; good_pr; mk_diff 156.0.1; run_gate
 expect "exit 0" test "$(cat "$WORK/exit")" = 0
 expect "merged=true output" contains "merged=true" "$WORK/output"
@@ -226,9 +229,9 @@ expect "label applied" contains "pr edit 7 --add-label needs-human" "$WORK/calls
 expect "reject comment posted" contains "AUTO-MERGE-REJECT" "$WORK/calls.log"
 expect "no merge" absent "pr merge" "$WORK/calls.log"
 
-echo "[3] decline: author_association CONTRIBUTOR"
-reset_env; mk_pr_json "renovate/termux-firefox-upstream-156" "$SHA_A" "ytoaa/termux-firefox-sandbox" "CONTRIBUTOR"; mk_diff 156.0.1; run_gate
-expect "declined association" contains "author-association-not-trusted:CONTRIBUTOR" "$WORK/stdout"
+echo "[3] decline: wrong PR actor even when same-repo"
+reset_env; mk_pr_json "renovate/termux-firefox-upstream-156" "$SHA_A" "ytoaa/termux-firefox-sandbox" "OWNER" "evil-user" "User"; mk_diff 156.0.1; run_gate
+expect "declined actor" contains "pr-author-not-trusted:evil-user/User" "$WORK/stdout"
 expect "no merge" absent "pr merge" "$WORK/calls.log"
 
 echo "[4] decline: wrong branch pattern"
@@ -237,7 +240,7 @@ expect "declined branch pattern" contains "branch-not-renovate-pattern" "$WORK/s
 
 echo "[5] abort: head changed during evaluation (TOCTOU F-01)"
 reset_env; good_pr; mk_diff 156.0.1
-jq -nc --arg s "$SHA_B" '{head:{ref:"renovate/termux-firefox-upstream-156", sha:$s, repo:{full_name:"ytoaa/termux-firefox-sandbox"}}, base:{ref:"main", repo:{full_name:"ytoaa/termux-firefox-sandbox"}}, author_association:"OWNER"}' > "$WORK/fixtures/pr2.json"
+jq -nc --arg s "$SHA_B" '{head:{ref:"renovate/termux-firefox-upstream-156", sha:$s, repo:{full_name:"ytoaa/termux-firefox-sandbox"}}, base:{ref:"main", repo:{full_name:"ytoaa/termux-firefox-sandbox"}}, user:{login:"github-actions[bot]",type:"Bot"}, author_association:"CONTRIBUTOR"}' > "$WORK/fixtures/pr2.json"
 run_gate
 expect "escalated head-changed" contains "head-changed-during-evaluation" "$WORK/stdout"
 expect "no merge" absent "pr merge" "$WORK/calls.log"

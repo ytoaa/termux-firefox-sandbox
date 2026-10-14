@@ -59,7 +59,7 @@ jobs:
       # sha256[0:16] of port/auto_merge_upstream.sh. Update this constant in
       # the same deliberate change that modifies the gate script — an
       # unaccompanied edit is exactly what this check catches.
-      GATE_HASH_PIN: d97d74dc5c451589
+      GATE_HASH_PIN: 70bb7c0677c2c16d
       API: ${{ github.api_url }}/repos/${{ github.repository }}
       TOKEN: ${{ secrets.GITHUB_TOKEN }}
       AGE_LIMIT: ${{ inputs.watcher_max_age_h || '8' }}
