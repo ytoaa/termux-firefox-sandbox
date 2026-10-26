@@ -2,20 +2,20 @@ Origin: ytoaa/termux-firefox-sandbox (apt channel)
 Label: Termux Firefox sandbox port
 Suite: stable
 Codename: stable
-Version: 2026-10-25
-Date: Sun, 25 Oct 2026 13:57:20 +0000
+Version: 2026-10-26
+Date: Mon, 26 Oct 2026 16:16:39 +0000
 Architectures: aarch64
 Components: main
 Description: Validated sandbox-port Firefox builds (version-lead scheme)
 MD5Sum:
- 7cac5513d4a8ef593003ada089d84ef0 3866 main/binary-aarch64/Packages
- 29c9b8475d694b998f9f1525dcbae056 969 main/binary-aarch64/Packages.gz
+ be133281a108a1a4c00591179e99d978 3866 main/binary-aarch64/Packages
+ 6dc449f7861c8a78b37357eb12186684 969 main/binary-aarch64/Packages.gz
 SHA1:
- 5c5c53b52fd8c3c7fe15eacb239cd6920aba0352 3866 main/binary-aarch64/Packages
- 0e59c46fc27928fbdf6eb60d59e0076d32d64979 969 main/binary-aarch64/Packages.gz
+ 267b7812de2284bfa102aa7fa4d1832b66d039cc 3866 main/binary-aarch64/Packages
+ 0b14d288a20bb089d7b3f9aa9954ef252722ed8c 969 main/binary-aarch64/Packages.gz
 SHA256:
- 2eae7c799905ebb2f9010a247ce380892da1704affd9994e529d1859075cef2d 3866 main/binary-aarch64/Packages
- d070f77cfcee91468ef9d940deed4723b946f4961dc1f7131681c8a6f696148c 969 main/binary-aarch64/Packages.gz
+ f1746454bc57d3458ef3d9c52e72ffdf46903117129a687abecc6a02c1753494 3866 main/binary-aarch64/Packages
+ 5bec5d772e65933cb70233cbd9f8ff49df4f97152d370e1f98a2cceefb6e66cb 969 main/binary-aarch64/Packages.gz
 SHA512:
- 46c49dbe100502a459642358c791b4e3ce1905483fe2ebd067ed5995a42a96e0b9518ce4a72971c261c1beacb97f6db74058f0466974ce71ed95daa2deed6e17 3866 main/binary-aarch64/Packages
- 50274034b210e4310f1fe7e98ae2bbd08ddd8924ff1a4463d02dae27038cc503af74c2b4a56005e3badcbf02f8689366ee868221397b425a8363037a219f4c26 969 main/binary-aarch64/Packages.gz
+ 2736a4d02db013eb9953c73af0fc6dc28838188db5a9e803af4385df727c111f24d3939993383d88eca603f44c043d55665af8e21c14366f523dc181637b6a83 3866 main/binary-aarch64/Packages
+ 3647e014e41caeced4eef501243c39ea51bffa4d1a3f9ead05a3709d674a055b628334305fc96b02ea763ffb3812ba0eeaf04c709d35bfad1843ed9ea8583508 969 main/binary-aarch64/Packages.gz
