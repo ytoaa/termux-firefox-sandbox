@@ -10,4 +10,4 @@
 #
 # The build itself still reads the live commit-pinned Termux recipe; this file
 # is a detection/approval anchor, not build input.
-termuxFirefoxVersion = "157.0.1"
+termuxFirefoxVersion = "159.0"
