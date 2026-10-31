@@ -77,7 +77,7 @@ Homepage: https://www.mozilla.org/firefox
 Depends: ffmpeg, fontconfig, freetype, gdk-pixbuf, glib, gtk3, libandroid-shmem, libandroid-glob, libandroid-spawn, libc++, libcairo, libevent, libffi, libice, libicu, libjpeg-turbo, libnspr, libnss, libpixman, libsm, libvpx, libwayland, libwebp, libx11, libxcb, libxcomposite, libxdamage, libxext, libxfixes, libxkbcommon, libxrandr, libxtst, pango, pulseaudio, zlib
 Description: Mozilla Firefox web browser
 Filename: pool/main/f/firefox/firefox_159.1-1.2.4.7_aarch64.deb
-Size: 69403424
-MD5sum: e88feb2a465e646ebc44add9ab433f88
-SHA1: 5405ba41ecff23dbf594314f9953261f26b5ce35
-SHA256: 35c6976c8b2b5d422a6661f265a7259a3fdab481851e142b408e5fdcdd197991
+Size: 69406396
+MD5sum: 0f8f272eb6d239f010454383bafd017d
+SHA1: bec86e92e8dfaec4c70a696b664ee5097e6a3469
+SHA256: 58d58ffaf111702bd2679eb0c7f86cf33b1ca8ca963844653e245c6d3f45cf2b
