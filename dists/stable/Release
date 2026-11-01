@@ -2,20 +2,20 @@ Origin: ytoaa/termux-firefox-sandbox (apt channel)
 Label: Termux Firefox sandbox port
 Suite: stable
 Codename: stable
-Version: 2026-10-31
-Date: Sat, 31 Oct 2026 15:30:30 +0000
+Version: 2026-11-01
+Date: Sun, 01 Nov 2026 16:12:38 +0000
 Architectures: aarch64
 Components: main
 Description: Validated sandbox-port Firefox builds (version-lead scheme)
 MD5Sum:
- 20dfe0f44c02b086bd3e00a9ec7fcfa4 4663 main/binary-aarch64/Packages
- 866d4829bad656f64fe5ae1f5fc7ed1a 1097 main/binary-aarch64/Packages.gz
+ 6e5431bb6f30506fa9c3b56e4732550b 4663 main/binary-aarch64/Packages
+ 3d926c489b776e70255524f86302dbaf 1103 main/binary-aarch64/Packages.gz
 SHA1:
- 4b71905dc42c662e614b6b2ac4617f95bc82c8e6 4663 main/binary-aarch64/Packages
- 8bfd3252095b431d2c359a4aff8ad1ec6bca847b 1097 main/binary-aarch64/Packages.gz
+ 4334521da79ff688ad7a6e395e00da4b2189ce2c 4663 main/binary-aarch64/Packages
+ cc99e764d80eee6e018f39b40b3cee25301e44da 1103 main/binary-aarch64/Packages.gz
 SHA256:
- f7d7c761e6427f57bee1e9c012f31eacadba6630c57178f8a1723b4b9ae236a3 4663 main/binary-aarch64/Packages
- 1e7117e14cd48d44c7cdc932f2a7c96a3940752895878a80b30563d3fc8ae4c8 1097 main/binary-aarch64/Packages.gz
+ 6417bf6ae39379b409b23311b020b4a7f63e169024485419283c22effce9837f 4663 main/binary-aarch64/Packages
+ aa84aa5fc4da297ecfc7d6222b985ab8dfee547f1eaae6be40170ebea1d2afa4 1103 main/binary-aarch64/Packages.gz
 SHA512:
- 25dc8f92a9f8a122ffa08e680639ff7fd8a006a17115f557a10e1e53abbd41c4dcf61edadaac8ce873cae6230a8a5818de917e4ad00388a3785735b2077a27ff 4663 main/binary-aarch64/Packages
- 0bd996aacd687c9970c029fe757d0773a570cfe4ef207e3d50818f15582b7d7ebbfddb2b3e0c3be3b6221a2c8e260178026f55fd7338d710740ec680c401ab0e 1097 main/binary-aarch64/Packages.gz
+ 569c947a2b6f5205e7b4b49d05f2912437815844cf214590895db019bcada686cf679ad4a088c08c37ab8d471cf4ff738323f8503bb61c253c2667a10e2ca1b7 4663 main/binary-aarch64/Packages
+ c119568ffa012178e827ce4d45e7f961026f18ae63c9c4e5720e68efa9f1af6734073cd8329fd33a0c496f4d4e5abcbcdb18a160de1a18d281752203ea1f8562 1103 main/binary-aarch64/Packages.gz
