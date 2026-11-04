@@ -218,6 +218,35 @@ jobs:
                       anom.append(f"FF-HEARTBEAT: workflow '{w.get('name')}' "
                                   f"state={st} — its schedule is DISABLED")
 
+          # 8) release bodies must describe the asset they carry (2026-11-05).
+          #    The 10-21 drift class was invisible to this watchdog for three
+          #    weeks: bodies cited digests the attached deb never had, so a
+          #    published checksum could not verify the file next to it.  Only
+          #    pair-scheme releases are audited — plain legacy `v<port>` tags
+          #    are historical evidence and are never rewritten.  Repair path:
+          #    port/repair_release_body.sh.
+          def check8():
+              pair = re.compile(r'^v[0-9]+\.[0-9]+\.[0-9]+-ff[0-9]+\.[0-9]+')
+              for rel in req('/releases?per_page=20'):
+                  tag = rel.get('tag_name', '')
+                  if not pair.match(tag):
+                      continue
+                  assets = rel.get('assets') or []
+                  if len(assets) != 1:
+                      anom.append(f'FF-HEARTBEAT: release {tag} carries '
+                                  f'{len(assets)} assets (expected exactly 1)')
+                      continue
+                  digest = str(assets[0].get('digest') or '')
+                  if not digest.startswith('sha256:'):
+                      anom.append(f'FF-HEARTBEAT: release {tag} asset has no '
+                                  f'sha256 digest — cannot verify provenance')
+                      continue
+                  sha = digest.split(':', 1)[1]
+                  if sha not in (rel.get('body') or ''):
+                      anom.append(f'FF-HEARTBEAT: release {tag} body does not '
+                                  f'record its asset digest {sha[:12]}… — stale '
+                                  f'provenance; run port/repair_release_body.sh')
+
           guard(1, check1)
           guard(2, check2)
           guard(3, check3)
@@ -225,6 +254,7 @@ jobs:
           guard(5, check5)
           guard(6, check6)
           guard(7, check7)
+          guard(8, check8)
 
           # 0) synthetic injection (dispatch-input testing only)
           if FORCE:

@@ -997,5 +997,21 @@ echo "[43f] one writer: make_release.sh sources port/release_notes.sh"
 expect "shared module sourced" contains "release_notes.sh" "$REPO_ROOT/port/make_release.sh"
 expect "repair tool sources the same module" contains "release_notes.sh" "$REPAIR"
 
+echo "[44] heartbeat: release-body audit (check8) wired, guarded, compiles"
+python3 - "$REPO_ROOT/.github/workflows/pipeline-health.yml" > "$WORK/stdout" 2>&1 <<'PY'
+import re, sys, textwrap
+src = open(sys.argv[1]).read()
+m = re.search(r"python3 - <<'PYEOF'\n(.*?)\n\s*PYEOF\n", src, re.S)
+assert m, "embedded python block missing"
+code = textwrap.dedent(m.group(1))
+compile(code, "pipeline-health", "exec")
+assert "def check8(" in code, "check8 missing"
+assert "guard(8, check8)" in code, "check8 not crash-guarded"
+assert "/releases?per_page=20" in code, "release listing missing"
+assert "repair_release_body.sh" in code, "repair path not named in the anomaly"
+print("OK")
+PY
+expect "check8 wired, guarded, compiles" contains "OK" "$WORK/stdout"
+
 printf '\n== %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [ "$FAIL" = "0" ]
