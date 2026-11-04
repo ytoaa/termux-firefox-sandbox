@@ -76,6 +76,8 @@ log "deb: $deb_name size=$local_size sha256=${local_digest:0:16}..."
 echo "$FIREFOX_VERSION" | grep -qE '^[0-9]+\.[0-9]+(\.[0-9]+)*$' \
   || die "firefox_version must be a dotted source version (got '$FIREFOX_VERSION')"
 SELF_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=port/release_notes.sh
+. "$SELF_DIR/release_notes.sh"
 lead=$(cd "$SELF_DIR" && python3 -c 'import sys; from prepare_recipe import packaged_version; print(packaged_version(sys.argv[1]))' "$FIREFOX_VERSION" 2>&1) \
   || die "firefox_version '$FIREFOX_VERSION' rejected as source version: $lead"
 lead_esc=$(printf '%s' "$lead" | sed 's/\./\\./g')
@@ -113,37 +115,14 @@ PY
 )
 fi
 
-# The single notes writer: create and body-refresh MUST emit identical
-# provenance fields, otherwise the two paths drift apart again.
+# The single notes writer lives in port/release_notes.sh so that the repair
+# path (port/repair_release_body.sh) cannot drift from the create/refresh
+# path.  Create and body-refresh MUST emit identical provenance fields.
 write_notes() { # $1 = output path, $2 = optional rebuild-history file
-  local out="$1" hist="${2:-}"
-  {
-    echo "Firefox **${FIREFOX_VERSION}** (upstream source) on sandbox port **${PORT_VERSION}** — this release is the versioned identity snapshot for exactly this (port, Firefox) pair; its deb is the only build it carries."
-    echo
-    echo "- package: \`${deb_name}\`  (Debian version = package-version lead \`${lead}\` + revision ending in the port version \`${PORT_VERSION}\`; the lead intentionally differs from the source version \`${FIREFOX_VERSION}\` — see port/DESIGN.md 'Release identity')"
-    echo "- sha256: \`${local_digest}\`"
-    echo "- termux-packages commit: \`${TERMUX_COMMIT}\`"
-    echo "- build run: ${SERVER}/${REPO}/actions/runs/${RUN_ID}"
-    echo "- validation: ${validation}${device_claim}"
-    echo
-    echo "Upgrade channel: APT (\`deb [trusted=yes arch=aarch64] https://ytoaa.github.io/termux-firefox-sandbox stable main\`) remains cumulative across Firefox versions; GitHub Releases are per-version snapshots."
-  } > "$out"
-  if [ -n "$hist" ] && [ -s "$hist" ]; then
-    {
-      echo
-      echo "## Rebuild history (append-only)"
-      echo
-      cat "$hist"
-    } >> "$out"
-  fi
+  release_notes_body "$1" "$FIREFOX_VERSION" "$PORT_VERSION" "$deb_name" "$lead" \
+    "$local_digest" "$TERMUX_COMMIT" "$SERVER" "$REPO" "$RUN_ID" \
+    "${validation}${device_claim}" "Rebuild history (append-only)" "${2:-}"
 }
-
-# Body parsing helpers — the previous provenance is read from the body itself,
-# so a rebuild records what it actually superseded even when the caller has no
-# memory of the earlier run.
-history_lines() { awk '/^## Rebuild history/{f=1;next} f' "$1" | sed '/^[[:space:]]*$/d'; }
-body_sha() { sed -n 's/^- sha256: `\([0-9a-f]\{64\}\)`.*/\1/p' "$1" | head -n1; }
-body_run() { sed -n 's|^- build run: .*/runs/\([0-9][0-9]*\).*|\1|p' "$1" | head -n1; }
 
 # 2/3/4) release + asset reconciliation ----------------------------------------
 # GET only: `gh api` defaults to POST when -f is passed (09-29 outage lesson).

@@ -273,3 +273,33 @@ only by `gh release create`.
 Idempotent re-runs (identical digest) stay write-free.  Legacy plain
 `v<port>` tags are never touched; this script only constructs
 `v<port>-ff<firefox>` tags.
+
+### One body writer, and repair of pre-fix releases (2026-11-05)
+
+The 2026-10-21 fix stops new drift but cannot repair releases published before
+it.  Three bodies still cited a digest their attached deb never had, so the
+published checksum could not verify the file next to it.  Hand-editing them
+would break the "bodies are generated" invariant, and a second copy of the
+template is exactly how the two paths drifted apart in the first place.
+
+- `port/release_notes.sh` is now the single writer.  `make_release.sh`
+  (create/refresh) and `port/repair_release_body.sh` both call
+  `release_notes_body`, so header/package/sha/commit/run/validation/APT lines
+  are byte-identical across the two paths; only the history section title
+  differs ("Rebuild history" vs "Repair history").
+- `repair_release_body.sh <tag> --run <id> --termux-commit <sha>` refuses to
+  run without both verified facts (no inferred provenance), refuses tags
+  outside the pair scheme, refuses multi-asset releases, is idempotent when
+  the body already records the asset digest, and read-back-asserts the result.
+
+Repaired 2026-11-05 — every body now records the attached asset's sha256:
+
+| tag | producing run | termux-packages commit | asset sha256 |
+|---|---|---|---|
+| `v2.4.7-ff158.0` | 39436744838 | `400a7c78…` | `2352363e…` |
+| `v2.4.7-ff158.0.1` | 40528432695 | `98d4ab55…` | `0af0d9a5…` |
+| `v2.4.7-ff159.0` | 41678611578 | `18260f8d…` | `22c280a1…` |
+
+Each run/commit pair was verified from that run's job log (`ref:` checkout
+line) and each digest from the same run's `RELEASE OK` line; the superseded
+values are preserved under "Repair history (append-only)" in the bodies.

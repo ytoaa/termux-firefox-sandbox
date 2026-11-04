@@ -500,7 +500,8 @@ expect "no release writes" absent "rel:release" "$WORK/calls.log"
 
 echo "[18f] release: device claim ONLY when port.toml ledger names the pair"
 mkdir -p "$WORK/relalt"
-cp "$REPO_ROOT/port/make_release.sh" "$REPO_ROOT/port/prepare_recipe.py" "$WORK/relalt/"
+cp "$REPO_ROOT/port/make_release.sh" "$REPO_ROOT/port/prepare_recipe.py" \
+   "$REPO_ROOT/port/release_notes.sh" "$WORK/relalt/"
 cat > "$WORK/relalt/port.toml" <<'LEDGER'
 [port]
 version = "9.9.9"
@@ -929,6 +930,72 @@ PIN=$(sed -n 's/.*GATE_HASH_PIN: *\([0-9a-f]\{16\}\).*/\1/p' "$REPO_ROOT/.github
 BLOB=$(sha256sum "$REPO_ROOT/port/auto_merge_upstream.sh" | cut -c1-16)
 expect "pin present and 16-hex" test -n "$PIN"
 expect "pin == gate blob hash ($BLOB)" test "$PIN" = "$BLOB"
+
+# ===========================================================================
+# Release body repair (2026-11-05). The pre-fix pipeline could publish a body
+# citing a digest the attached asset never had; repair regenerates the body
+# from the asset + operator-verified provenance, never guessing either.
+# ===========================================================================
+REPAIR="$REPO_ROOT/port/repair_release_body.sh"
+REPAIR_RUN=424242
+REPAIR_COMMIT=abcdefabcdefabcdefabcdefabcdefabcdefabcd
+
+run_repair() { # args are passed straight through
+  rm -f "$WORK/calls.log"
+  PATH="$WORK/binrel:$PATH" REPO="ytoaa/termux-firefox-sandbox" \
+    bash "$REPAIR" "$@" > "$WORK/stdout" 2>&1
+  echo $? > "$WORK/exit"
+}
+
+echo "[43] repair: stale body rewritten from the attached asset"
+mk_pkg_named firefox_156.1.1-1.9.9.9_aarch64.deb
+DG="sha256:$(sha256sum "$WORK/pkg/firefox_156.1.1-1.9.9.9_aarch64.deb" | cut -d' ' -f1)"
+SZ=$(stat -c%s "$WORK/pkg/firefox_156.1.1-1.9.9.9_aarch64.deb")
+OLD_SHA=3333333333333333333333333333333333333333333333333333333333333333
+OLD_BODY="$(printf -- '- sha256: `%s`\n- build run: https://github.com/o/r/actions/runs/2222\n- validation: CI validated: semantic port verification PASS; AudioIPC binary gate PASS.\n' "$OLD_SHA")"
+jq -nc --arg n "firefox_156.1.1-1.9.9.9_aarch64.deb" --argjson s "$SZ" --arg d "$DG" --arg b "$OLD_BODY" \
+  '{assets:[{name:$n,size:$s,digest:$d}], body:$b}' > "$WORK/rel_state.json"
+run_repair v9.9.9-ff156.0.1 --run "$REPAIR_RUN" --termux-commit "$REPAIR_COMMIT"
+expect "exit 0" test "$(cat "$WORK/exit")" = 0
+expect "body edit issued on the pair tag" contains "rel:release edit v9.9.9-ff156.0.1" "$WORK/calls.log"
+NEW_DG="$(sha256sum "$WORK/pkg/firefox_156.1.1-1.9.9.9_aarch64.deb" | cut -d' ' -f1)"
+expect "current sha line == published asset digest" bash -c 'sed -n "s/^- sha256: .\([0-9a-f]*\).*/\1/p" "$1" | head -1 | grep -qx "$2"' _ "$WORK/rel_notes.txt" "$NEW_DG"
+expect "verified build run recorded" contains "actions/runs/$REPAIR_RUN" "$WORK/rel_notes.txt"
+expect "verified termux commit recorded" contains "$REPAIR_COMMIT" "$WORK/rel_notes.txt"
+expect "repair history section present" contains "## Repair history (append-only)" "$WORK/rel_notes.txt"
+expect "superseded digest preserved" contains "$OLD_SHA" "$WORK/rel_notes.txt"
+expect "superseded run preserved" contains "build run 2222" "$WORK/rel_notes.txt"
+expect "exactly one asset remains" jq -e '.assets | length == 1' "$WORK/rel_state.json"
+
+echo "[43b] repair: body already matches the asset -> zero writes"
+run_repair v9.9.9-ff156.0.1 --run "$REPAIR_RUN" --termux-commit "$REPAIR_COMMIT"
+expect "exit 0" test "$(cat "$WORK/exit")" = 0
+expect "already-consistent message" contains "already records the published digest" "$WORK/stdout"
+expect "no release edit" absent "rel:release edit" "$WORK/calls.log"
+
+echo "[43c] repair: provenance is never guessed -> missing --run refused"
+run_repair v9.9.9-ff156.0.1 --termux-commit "$REPAIR_COMMIT"
+expect "exit 1" test "$(cat "$WORK/exit")" = 1
+expect "refusal names the missing fact" contains "verified --run is required" "$WORK/stdout"
+expect "no release writes" absent "rel:release" "$WORK/calls.log"
+
+echo "[43d] repair: multi-asset release refused (single-asset invariant)"
+jq -nc '{assets:[{name:"a.deb",size:1,digest:"sha256:aa"},{name:"b.deb",size:1,digest:"sha256:bb"}], body:"old"}' > "$WORK/rel_state.json"
+run_repair v9.9.9-ff156.0.1 --run "$REPAIR_RUN" --termux-commit "$REPAIR_COMMIT"
+expect "exit 1" test "$(cat "$WORK/exit")" = 1
+expect "asset-count refusal logged" contains "carries 2 assets" "$WORK/stdout"
+expect "no release edit" absent "rel:release edit" "$WORK/calls.log"
+
+echo "[43e] repair: tag outside the pair scheme refused"
+jq -nc '{assets:[{name:"a.deb",size:1,digest:"sha256:aa"}], body:"old"}' > "$WORK/rel_state.json"
+run_repair v2.4.7 --run "$REPAIR_RUN" --termux-commit "$REPAIR_COMMIT"
+expect "exit 1" test "$(cat "$WORK/exit")" = 1
+expect "scheme refusal logged" contains "tag is not v<port>-ff<firefox>" "$WORK/stdout"
+expect "no API reads or writes" absent "rel:release" "$WORK/calls.log"
+
+echo "[43f] one writer: make_release.sh sources port/release_notes.sh"
+expect "shared module sourced" contains "release_notes.sh" "$REPO_ROOT/port/make_release.sh"
+expect "repair tool sources the same module" contains "release_notes.sh" "$REPAIR"
 
 printf '\n== %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [ "$FAIL" = "0" ]
