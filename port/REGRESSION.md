@@ -1,17 +1,19 @@
-# Device regression gate — procedure (last full device pass: v2.4.7 / Firefox 157.0)
+# Device regression gate — procedure (last full device pass: v2.4.7 / Firefox 159.0.1)
 
-> Status (2026-10-02): the procedures below are port-version-agnostic and
+> Status (2026-11-05): the procedures below are port-version-agnostic and
 > remain the device acceptance gate.  The header's version anchor records the
 > LAST complete device level-6 re-validation: **v2.4.7 build of Firefox
-> 157.0** (`firefox_157.1-1.2.4.7_aarch64.deb`, package 157.1-1.2.4.7),
-> full device gate PASS 2026-10-02 on the maintainer device — binary gate
-> 4/4, level-6 baseline (tsync, zero SIGSYS/violation/fstatfs), codecs
-> H.264/VP9/AV1/AAC/Opus supported in file+media-source, local sample
-> playback progressing, AudioIPC parent cubeb server with live PulseAudio
-> and zero content-direct pulse connects, level-4 X11 socket path, YouTube
-> streaming playback, clean WebRender GUI rendering.  Evidence:
-> `~/hermes/output/ff-157-evidence/` (device-local; report in
-> `ff-157-device-report.md` there).  Prior pass: v2.4.5/r3, Firefox
+> 159.0.1** (`firefox_159.1.1-1.2.4.7_aarch64.deb`, package 159.1.1-1.2.4.7,
+> deb sha256 `c2e4eb9c63ae2fc5fa8dbbf4e78170529cb4921040de99abf01d44ff316321ed`),
+> full device gate PASS 2026-11-05 on the maintainer device — binary gate
+> 4/4, level-6 baseline (tsync ×9, zero SIGSYS/violation/fstatfs, effective
+> content level 6 read back over Marionette), codecs H.264/VP9/AV1/AAC/Opus
+> supported in file+media-source, local sample playback completing,
+> AudioIPC parent cubeb server with live PulseAudio and zero content-direct
+> pulse connects, level-4 X11 socket path, YouTube streaming playback, clean
+> WebRender GUI rendering.  Evidence: `~/hermes/output/ff-159-evidence/`
+> (device-local; report in `ff-159-device-report.md` there).  Prior pass:
+> v2.4.7 / Firefox 157.0, 2026-10-02; before that v2.4.5/r3, Firefox
 > 156.0.1, 2026-09-14.
 
 This candidate changes two security-relevant paths relative to validated

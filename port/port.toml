@@ -1,14 +1,14 @@
 [port]
 version = "2.4.7"
 last_validated_port = "2.4.7"
-last_validated_firefox = "157.0"
+last_validated_firefox = "159.0.1"
 # Rebuild trigger: minor (0.1-level) segment movement from the schedule only;
 # revision and source-hash drift are reported in the gate summary without
 # scheduling a build (the M.(m+1).p package-version lead keeps installs safe
 # through dots, and dot security fixes reach users via the Renovate watcher's
 # approval PR whose merge runs the gate forced).
 last_validated_revision = "0"
-last_validated_srcsha256 = "259c564dd4bbd56bbe8a9a6cf001fc8812853567fd3a78e77c9ddf10d7d4e982"
+last_validated_srcsha256 = "b5fe407199685f8bddf3b2c81feb8b805429e6f3d307c9430f53456f85b6e063"
 policy_mode = "fail-closed"
 
 [termux]
