@@ -390,20 +390,52 @@ if [ "${1:-}" = "release" ]; then
     create)
       # capture the release body so fixtures can assert validation wording
       shift 2
+      body=""
       while [ $# -gt 0 ]; do
-        case "$1" in --notes-file) [ -n "${2:-}" ] && cp "$2" "$W/rel_notes.txt" 2>/dev/null;; esac
+        case "$1" in
+          --notes-file) [ -n "${2:-}" ] && { cp "$2" "$W/rel_notes.txt" 2>/dev/null; body=$(cat "$2"); } ;;
+        esac
         shift
       done
-      # write a state with no assets (release exists but empty)
-      jq -nc '{assets:[]}' > "$STATE"; exit 0;;
+      # real GitHub stores the notes AS the release body; the old stub dropped
+      # it, which is exactly how body-vs-asset provenance drift stayed green.
+      jq -nc --arg b "$body" '{assets:[], body:$b}' > "$STATE"; exit 0;;
+    edit)
+      shift 2   # edit <tag>
+      body=""
+      while [ $# -gt 0 ]; do
+        case "$1" in
+          --notes-file) [ -n "${2:-}" ] && { cp "$2" "$W/rel_notes.txt" 2>/dev/null; body=$(cat "$2"); } ;;
+        esac
+        shift
+      done
+      [ -f "$STATE" ] || echo '{"assets":[]}' > "$STATE"
+      jq --arg b "$body" '.body = $b' < "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+      exit 0;;
+    delete-asset)
+      name="$4"
+      [ -f "$STATE" ] || exit 0
+      jq --arg n "$name" '.assets = ((.assets // []) | map(select(.name != $n)))' \
+        < "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
+      exit 0;;
     upload)
-      tag="$3"; deb="$4"; clobber="${5:-}"
+      tag="$3"; deb="$4"; clobber="${5:-}"; name="$(basename "$deb")"
+      [ -f "$STATE" ] || echo '{"assets":[]}' > "$STATE"
+      # real gh upload FAILS on an existing name without --clobber (HTTP 422);
+      # the old stub silently overwrote, which could hide a missing --clobber.
+      if jq -e --arg n "$name" 'any(.assets[]?; .name == $n)' < "$STATE" >/dev/null; then
+        [ "$clobber" = "--clobber" ] || { echo "stub: asset $name exists (HTTP 422); --clobber required" >&2; exit 1; }
+      fi
       if [ "${FAIL_MODE:-}" = "readback_corrupt" ]; then
-        jq -nc --arg n "$(basename "$deb")" --arg d "sha256:deadbeef" --argjson s 1 '{assets:[{name:$n,size:$s,digest:$d}]}' > "$STATE"
+        sz=1; dg="sha256:deadbeef"
       else
         sz=$(stat -c%s "$deb"); dg="sha256:$(sha256sum "$deb" | cut -d' ' -f1)"
-        jq -nc --arg n "$(basename "$deb")" --argjson s "$sz" --arg d "$dg" '{assets:[{name:$n,size:$s,digest:$d}]}' > "$STATE"
       fi
+      # merge instead of replace: a superseded asset from a revision bump must
+      # stay visible so the single-asset invariant is actually exercised.
+      jq --arg n "$name" --argjson s "$sz" --arg d "$dg" \
+         '.assets = (((.assets // []) | map(select(.name != $n))) + [{name:$n,size:$s,digest:$d}])' \
+         < "$STATE" > "$STATE.tmp" && mv "$STATE.tmp" "$STATE"
       exit 0;;
   esac
   exit 0
@@ -492,21 +524,59 @@ echo "[19] release: idempotent — identical asset already published, zero write
 mk_pkg
 dg="sha256:$(sha256sum "$WORK/pkg/$REL_DEB" | cut -d' ' -f1)"
 sz=$(stat -c%s "$WORK/pkg/$REL_DEB")
-jq -nc --arg n "$REL_DEB" --argjson s "$sz" --arg d "$dg" '{assets:[{name:$n,size:$s,digest:$d}]}' > "$WORK/rel_state.json"
+jq -nc --arg n "$REL_DEB" --argjson s "$sz" --arg d "$dg" --arg b "recorded sha256: $dg" \
+  '{assets:[{name:$n,size:$s,digest:$d}], body:$b}' > "$WORK/rel_state.json"
 run_rel
 expect "exit 0" test "$(cat "$WORK/exit")" = 0
 expect "no create" absent "rel:release create" "$WORK/calls.log"
 expect "no upload" absent "rel:release upload" "$WORK/calls.log"
+expect "no body edit on identical asset (write-free idempotency)" absent "rel:release edit" "$WORK/calls.log"
 expect "no-edit message logged" contains "identical digest" "$WORK/stdout"
 
-echo "[20] release: differing digest -> clobber replace"
+echo "[20] release: differing digest -> clobber replace + body refresh"
 mk_pkg
-jq -nc --arg n "$REL_DEB" '{assets:[{name:$n,size:99,digest:"sha256:old"}]}' > "$WORK/rel_state.json"
+OLD_SHA=1111111111111111111111111111111111111111111111111111111111111111
+OLD_BODY="$(printf -- '- sha256: `%s`\n- build run: https://github.com/o/r/actions/runs/1111\n' "$OLD_SHA")"
+jq -nc --arg n "$REL_DEB" --arg b "$OLD_BODY" \
+  '{assets:[{name:$n,size:99,digest:"sha256:old"}], body:$b}' > "$WORK/rel_state.json"
 run_rel
 expect "exit 0" test "$(cat "$WORK/exit")" = 0
 expect "clobbered" contains "rel:release upload v9.9.9-ff156.0.1" "$WORK/calls.log"
 expect "clobber branch logged" contains "replacing with clobber" "$WORK/stdout"
 expect "no release create on existing tag" absent "rel:release create" "$WORK/calls.log"
+expect "body refreshed after asset change" contains "release body refreshed" "$WORK/stdout"
+expect "edit called on the pair tag" contains "rel:release edit v9.9.9-ff156.0.1" "$WORK/calls.log"
+NEW_DG="$(sha256sum "$WORK/pkg/$REL_DEB" | cut -d' ' -f1)"
+expect "current sha line == new digest" bash -c 'sed -n "s/^- sha256: .\([0-9a-f]*\).*/\1/p" "$1" | head -1 | grep -qx "$2"' _ "$WORK/rel_notes.txt" "$NEW_DG"
+expect "rebuild history section present" contains "## Rebuild history" "$WORK/rel_notes.txt"
+expect "history records the superseded digest" contains "$OLD_SHA" "$WORK/rel_notes.txt"
+expect "history records the superseded run" contains "build run 1111" "$WORK/rel_notes.txt"
+expect "state body now carries the new digest" jq -e --arg d "$NEW_DG" '.body | contains($d)' "$WORK/rel_state.json"
+
+echo "[20b] release: asset OK but body cites another digest -> stale provenance refused"
+mk_pkg
+DG="sha256:$(sha256sum "$WORK/pkg/$REL_DEB" | cut -d' ' -f1)"
+SZ=$(stat -c%s "$WORK/pkg/$REL_DEB")
+STALE=2222222222222222222222222222222222222222222222222222222222222222
+jq -nc --arg n "$REL_DEB" --argjson s "$SZ" --arg d "$DG" --arg b "recorded sha256: $STALE" \
+  '{assets:[{name:$n,size:$s,digest:$d}], body:$b}' > "$WORK/rel_state.json"
+run_rel
+expect "exit 1 (stale body is a hard failure)" test "$(cat "$WORK/exit")" = 1
+expect "stale provenance named" contains "stale provenance" "$WORK/stdout"
+expect "no upload on an unchanged asset" absent "rel:release upload" "$WORK/calls.log"
+expect "no silent body rewrite on the no-op path" absent "rel:release edit" "$WORK/calls.log"
+
+echo "[20c] release: revision-bump rebuild (renamed deb) leaves exactly one asset"
+mk_pkg_named firefox_156.1.1-2.9.9.9_aarch64.deb
+OLD_DEB=firefox_156.1.1-1.9.9.9_aarch64.deb
+jq -nc --arg n "$OLD_DEB" --arg b "old body without provenance" \
+  '{assets:[{name:$n,size:99,digest:"sha256:old"}], body:$b}' > "$WORK/rel_state.json"
+run_rel
+expect "exit 0" test "$(cat "$WORK/exit")" = 0
+expect "superseded asset removed" contains "rel:release delete-asset v9.9.9-ff156.0.1 $OLD_DEB" "$WORK/calls.log"
+expect "exactly one asset remains" jq -e '.assets | length == 1' "$WORK/rel_state.json"
+expect "remaining asset is the current deb" jq -e --arg n "firefox_156.1.1-2.9.9.9_aarch64.deb" '.assets[0].name == $n' "$WORK/rel_state.json"
+expect "body refreshed for the renamed deb" contains "release body refreshed" "$WORK/stdout"
 
 echo "[21] release: tampered deb (digest mismatch vs SHA256SUMS) -> fail closed"
 mk_pkg; printf 'TAMPER' >> "$WORK/pkg/$REL_DEB"
@@ -848,6 +918,17 @@ expect "workflow wiring invariants hold" contains "OK" "$WORK/stdout"
 if ! grep -q OK "$WORK/stdout"; then
   echo "    --- wiring failure detail ---"; tail -6 "$WORK/stdout" | sed 's/^/    /'
 fi
+
+# ===========================================================================
+# Heartbeat pin ↔ gate blob consistency. The pin is the watchdog's only
+# defence against an unaccompanied gate edit; 2b2555d shipped it stale, which
+# turned check5 permanently red — alarm fatigue that masks the next real drift.
+# ===========================================================================
+echo "[42] heartbeat GATE_HASH_PIN matches port/auto_merge_upstream.sh"
+PIN=$(sed -n 's/.*GATE_HASH_PIN: *\([0-9a-f]\{16\}\).*/\1/p' "$REPO_ROOT/.github/workflows/pipeline-health.yml" | head -1)
+BLOB=$(sha256sum "$REPO_ROOT/port/auto_merge_upstream.sh" | cut -c1-16)
+expect "pin present and 16-hex" test -n "$PIN"
+expect "pin == gate blob hash ($BLOB)" test "$PIN" = "$BLOB"
 
 printf '\n== %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [ "$FAIL" = "0" ]

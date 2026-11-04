@@ -249,3 +249,27 @@ validated" claim only when `port.toml`'s ledger names exactly that
 (firefox, port) pair.  Legacy note: releases tagged plain `v<port>` predate
 this scheme (`v2.4.7` stays as the historical Firefox 156.0.1 snapshot; its
 body is historical evidence and is never edited).
+
+### Release body truthfulness (2026-10-21)
+
+A same-pair rebuild used to clobber the asset while the body kept citing the
+previous build.  Observed on `v2.4.7-ff158.0`: body said sha256 `29fc95cd…`
+from run `39284165643`, while the asset on GitHub was `2352363e…` uploaded by
+run `39436744838` — a published checksum that cannot verify the deb it is
+attached to.  Cause: `--clobber` on the reconcile path, with notes written
+only by `gh release create`.
+
+`make_release.sh` now enforces three invariants in the same run:
+
+- **body refresh**: when the asset changes, the body is regenerated with the
+  new digest/build-run and pushed with `gh release edit`; superseded builds
+  are appended to a bounded, append-only "Rebuild history" section.
+- **single asset**: a revision bump renames the deb, so the superseded asset
+  is deleted — "its deb is the only build it carries" stays literally true.
+- **read-back gate**: success requires asset digest == local, exactly one
+  asset, and a body containing the published digest.  A stale body fails
+  closed instead of publishing a false provenance record.
+
+Idempotent re-runs (identical digest) stay write-free.  Legacy plain
+`v<port>` tags are never touched; this script only constructs
+`v<port>-ff<firefox>` tags.

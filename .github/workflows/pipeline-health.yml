@@ -59,7 +59,11 @@ jobs:
       # sha256[0:16] of port/auto_merge_upstream.sh. Update this constant in
       # the same deliberate change that modifies the gate script — an
       # unaccompanied edit is exactly what this check catches.
-      GATE_HASH_PIN: 70bb7c0677c2c16d
+      # 2026-10-21 fix: 2b2555d changed the gate and pinned an intermediate
+      # hash (70bb7c0677c2c16d), so check5 was permanently red — alarm fatigue
+      # that would also mask a real future gate edit. Scenario [42] of
+      # port/tests/run_tests.sh now fails the PR harness if pin and blob drift.
+      GATE_HASH_PIN: e403422a23c4ac72
       API: ${{ github.api_url }}/repos/${{ github.repository }}
       TOKEN: ${{ secrets.GITHUB_TOKEN }}
       AGE_LIMIT: ${{ inputs.watcher_max_age_h || '8' }}

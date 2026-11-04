@@ -25,12 +25,22 @@
 #       a wrong-Firefox build uploading to another Firefox's release fail
 #       closed (and rejects passing the lead, e.g. 157.1, as source version).
 #   2. Ensure release tag v<port_version>-ff<firefox_version> exists (created
-#      only when missing; an existing release body is NEVER edited — it may
-#      be hand-written).
+#      only when missing; the body is generated here, never hand-edited).
 #   3. Ensure the deb asset exists with the exact local digest (upload only
 #      when absent or digest-different; --clobber replaces the rebuild).
-#   4. Read back the release from the API and assert name+size+digest match
-#      before declaring success.
+#   3b. If the release already existed and its asset changed, REFRESH the
+#      release body in the same run so that the recorded sha256 / build run
+#      always describe the deb the release actually carries.  Every
+#      superseded build is appended to an append-only "Rebuild history"
+#      section (bounded), never silently dropped.  This closes the
+#      2026-10-21 defect where a same-pair rebuild clobbered the asset while
+#      the body kept citing the previous run and digest.
+#   3c. Remove assets whose name is not the current deb (a Termux revision
+#      bump renames the deb), so the release carries exactly one build — the
+#      invariant its body states.
+#   4. Read back the release from the API and assert name+size+digest, a
+#      single asset, and that the body records the published digest before
+#      declaring success.  A stale body is a hard failure, not a warning.
 set -euo pipefail
 
 ART_DIR="${1:?usage: make_release.sh <artifacts-dir> <port_version> <firefox_version> <termux_commit>}"
@@ -75,6 +85,65 @@ echo "$deb_name" | grep -qE "^firefox_${lead_esc}-[0-9]+\\.${port_esc}_aarch64\\
 log "provenance: deb lead=$lead matches firefox $FIREFOX_VERSION on port $PORT_VERSION"
 
 TAG="v${PORT_VERSION}-ff${FIREFOX_VERSION}"
+RUN_ID="${GITHUB_RUN_ID:-unknown}"
+SERVER="${GITHUB_SERVER_URL:-https://github.com}"
+
+# Validation wording is deliberately conservative: claim only what the
+# pipeline itself proves.  A device level-6 claim is added ONLY when the
+# port.toml validation ledger names exactly this (firefox, port) pair and
+# carries a well-formed source hash; ambiguity never claims device passes.
+validation="CI validated: semantic port verification PASS; AudioIPC binary gate PASS."
+device_claim=""
+if [ -f "$SELF_DIR/port.toml" ]; then
+  device_claim=$(python3 - "$SELF_DIR/port.toml" "$FIREFOX_VERSION" "$PORT_VERSION" <<'PY'
+import re, sys, tomllib
+try:
+    with open(sys.argv[1], "rb") as fh:
+        port = tomllib.load(fh).get("port", {})
+except Exception:
+    sys.exit(0)
+if (port.get("last_validated_firefox") == sys.argv[2]
+        and port.get("last_validated_port") == sys.argv[3]
+        and re.fullmatch(r"[0-9a-f]{64}", str(port.get("last_validated_srcsha256", "")))
+        and str(port.get("last_validated_revision", "")) != ""):
+    print(" Device level-6 validated on maintainer device per port.toml ledger"
+          " (last_validated_firefox=%s, last_validated_port=%s)."
+          % (port["last_validated_firefox"], port["last_validated_port"]))
+PY
+)
+fi
+
+# The single notes writer: create and body-refresh MUST emit identical
+# provenance fields, otherwise the two paths drift apart again.
+write_notes() { # $1 = output path, $2 = optional rebuild-history file
+  local out="$1" hist="${2:-}"
+  {
+    echo "Firefox **${FIREFOX_VERSION}** (upstream source) on sandbox port **${PORT_VERSION}** — this release is the versioned identity snapshot for exactly this (port, Firefox) pair; its deb is the only build it carries."
+    echo
+    echo "- package: \`${deb_name}\`  (Debian version = package-version lead \`${lead}\` + revision ending in the port version \`${PORT_VERSION}\`; the lead intentionally differs from the source version \`${FIREFOX_VERSION}\` — see port/DESIGN.md 'Release identity')"
+    echo "- sha256: \`${local_digest}\`"
+    echo "- termux-packages commit: \`${TERMUX_COMMIT}\`"
+    echo "- build run: ${SERVER}/${REPO}/actions/runs/${RUN_ID}"
+    echo "- validation: ${validation}${device_claim}"
+    echo
+    echo "Upgrade channel: APT (\`deb [trusted=yes arch=aarch64] https://ytoaa.github.io/termux-firefox-sandbox stable main\`) remains cumulative across Firefox versions; GitHub Releases are per-version snapshots."
+  } > "$out"
+  if [ -n "$hist" ] && [ -s "$hist" ]; then
+    {
+      echo
+      echo "## Rebuild history (append-only)"
+      echo
+      cat "$hist"
+    } >> "$out"
+  fi
+}
+
+# Body parsing helpers — the previous provenance is read from the body itself,
+# so a rebuild records what it actually superseded even when the caller has no
+# memory of the earlier run.
+history_lines() { awk '/^## Rebuild history/{f=1;next} f' "$1" | sed '/^[[:space:]]*$/d'; }
+body_sha() { sed -n 's/^- sha256: `\([0-9a-f]\{64\}\)`.*/\1/p' "$1" | head -n1; }
+body_run() { sed -n 's|^- build run: .*/runs/\([0-9][0-9]*\).*|\1|p' "$1" | head -n1; }
 
 # 2/3/4) release + asset reconciliation ----------------------------------------
 # GET only: `gh api` defaults to POST when -f is passed (09-29 outage lesson).
@@ -95,6 +164,10 @@ get_release() {
 }
 
 rel_json=$(get_release)
+created=false
+old_body=""
+old_sha=""
+old_run=""
 
 if [ -z "$rel_json" ]; then
   log "release $TAG does not exist"
@@ -102,59 +175,35 @@ if [ -z "$rel_json" ]; then
     log "DRY_RUN: would create release $TAG and upload $deb_name"
     exit 0
   fi
-  # Validation wording is deliberately conservative: claim only what the
-  # pipeline itself proves.  A device level-6 claim is added ONLY when the
-  # port.toml validation ledger names exactly this (firefox, port) pair and
-  # carries a well-formed source hash; ambiguity never claims device passes.
-  validation="CI validated: semantic port verification PASS; AudioIPC binary gate PASS."
-  device_claim=""
-  if [ -f "$SELF_DIR/port.toml" ]; then
-    device_claim=$(python3 - "$SELF_DIR/port.toml" "$FIREFOX_VERSION" "$PORT_VERSION" <<'PY'
-import re, sys, tomllib
-try:
-    with open(sys.argv[1], "rb") as fh:
-        port = tomllib.load(fh).get("port", {})
-except Exception:
-    sys.exit(0)
-if (port.get("last_validated_firefox") == sys.argv[2]
-        and port.get("last_validated_port") == sys.argv[3]
-        and re.fullmatch(r"[0-9a-f]{64}", str(port.get("last_validated_srcsha256", "")))
-        and str(port.get("last_validated_revision", "")) != ""):
-    print(" Device level-6 validated on maintainer device per port.toml ledger"
-          " (last_validated_firefox=%s, last_validated_port=%s)."
-          % (port["last_validated_firefox"], port["last_validated_port"]))
-PY
-)
-  fi
   notes=$(mktemp)
-  {
-    echo "Firefox **${FIREFOX_VERSION}** (upstream source) on sandbox port **${PORT_VERSION}** — this release is the versioned identity snapshot for exactly this (port, Firefox) pair; its deb is the only build it carries."
-    echo
-    echo "- package: \`${deb_name}\`  (Debian version = package-version lead \`${lead}\` + revision ending in the port version \`${PORT_VERSION}\`; the lead intentionally differs from the source version \`${FIREFOX_VERSION}\` — see port/DESIGN.md 'Release identity')"
-    echo "- sha256: \`${local_digest}\`"
-    echo "- termux-packages commit: \`${TERMUX_COMMIT}\`"
-    echo "- build run: ${GITHUB_SERVER_URL:-https://github.com}/${REPO}/actions/runs/${GITHUB_RUN_ID:-unknown}"
-    echo "- validation: ${validation}${device_claim}"
-    echo
-    echo "Upgrade channel: APT (\`deb [trusted=yes arch=aarch64] https://ytoaa.github.io/termux-firefox-sandbox stable main\`) remains cumulative across Firefox versions; GitHub Releases are per-version snapshots."
-  } > "$notes"
+  write_notes "$notes"
   create_args=(gh release create "$TAG" --title "Firefox ${FIREFOX_VERSION} — Sandbox Port ${PORT_VERSION}" --notes-file "$notes")
   [ -n "$GIT_SHA" ] && create_args+=(--target "$GIT_SHA")
   "${create_args[@]}" || die "gh release create failed for $TAG"
   log "created release $TAG"
-elif [ "$DRY_RUN" = "true" ]; then
-  log "DRY_RUN: release $TAG exists; would reconcile asset $deb_name"
-  exit 0
+  created=true
+else
+  if [ "$DRY_RUN" = "true" ]; then
+    log "DRY_RUN: release $TAG exists; would reconcile asset $deb_name and refresh the body if the asset changes"
+    exit 0
+  fi
+  old_body=$(mktemp)
+  gh api "repos/${REPO}/releases/tags/${TAG}" --jq '.body // ""' > "$old_body" \
+    || die "release body read-back failed for $TAG"
+  old_sha=$(body_sha "$old_body")
+  old_run=$(body_run "$old_body")
 fi
 
 asset_state=$(gh api "repos/${REPO}/releases/tags/${TAG}" \
   --jq "[.assets[]? | select(.name==\"${deb_name}\")][0] | if . == null then \"missing\" else \"\(.size) \(.digest // \"none\")\" end") \
   || die "release read-back failed for $TAG"
 
+changed=false
 case "$asset_state" in
   missing)
     log "asset $deb_name absent -> uploading"
     gh release upload "$TAG" "$deb" || die "gh release upload failed"
+    changed=true
     ;;
   "${local_size} sha256:${local_digest}")
     log "asset $deb_name already published with identical digest -> no upload"
@@ -162,14 +211,59 @@ case "$asset_state" in
   *)
     log "asset digest differs ($asset_state) -> replacing with clobber (rebuild of same port version)"
     gh release upload "$TAG" "$deb" --clobber || die "gh release upload --clobber failed"
+    changed=true
     ;;
 esac
 
-# 4) final read-back: the published asset MUST equal the local file ----------
+# 3b) body refresh: the asset just changed, so the recorded provenance MUST
+# change with it.  Skipped when the digest was already identical, which keeps
+# the idempotent re-run path write-free.
+if [ "$created" = "false" ] && [ "$changed" = "true" ]; then
+  hist=$(mktemp)
+  {
+    history_lines "$old_body"
+    printf -- '- %s: superseded sha256 `%s` (build run %s) with sha256 `%s` (build run %s); termux-packages `%s`\n' \
+      "$(date -u +%Y-%m-%dT%H:%M:%SZ)" "${old_sha:-unknown}" "${old_run:-unknown}" \
+      "$local_digest" "$RUN_ID" "$TERMUX_COMMIT"
+  } | tail -n 20 > "$hist"
+  notes=$(mktemp)
+  write_notes "$notes" "$hist"
+  gh release edit "$TAG" --notes-file "$notes" \
+    || die "gh release edit failed for $TAG (asset changed but body would stay stale)"
+  log "release body refreshed: recorded sha256/build-run now match the published asset"
+fi
+
+# 3c) a revision-bump rebuild renames the deb; the superseded asset must not
+# linger, or the release would carry two builds while its body says one.
+stale=$(gh api "repos/${REPO}/releases/tags/${TAG}" \
+  --jq "[.assets[]? | select(.name != \"${deb_name}\") | .name] | .[]") \
+  || die "asset list read-back failed for $TAG"
+if [ -n "$stale" ]; then
+  while IFS= read -r stale_name; do
+    [ -n "$stale_name" ] || continue
+    log "removing superseded asset $stale_name (release carries exactly one deb)"
+    gh release delete-asset "$TAG" "$stale_name" --yes \
+      || die "gh release delete-asset failed for $stale_name"
+  done <<< "$stale"
+fi
+
+# 4) final read-back: asset, single-asset invariant, and body provenance ------
 verify=$(gh api "repos/${REPO}/releases/tags/${TAG}" \
   --jq "[.assets[]? | select(.name==\"${deb_name}\")][0] | if . == null then \"MISSING\" else \"\(.size) \(.digest // \"none\")\" end") \
   || die "final release read-back failed"
 [ "$verify" = "${local_size} sha256:${local_digest}" ] \
   || die "read-back MISMATCH: expected '$local_size sha256:$local_digest', got '$verify'"
 
-log "RELEASE OK: $TAG asset=$deb_name size=$local_size digest=${local_digest:0:16}..."
+asset_count=$(gh api "repos/${REPO}/releases/tags/${TAG}" --jq '[.assets[]?] | length') \
+  || die "asset count read-back failed for $TAG"
+[ "$asset_count" = "1" ] \
+  || die "release $TAG carries $asset_count assets; expected exactly 1 (superseded build left behind)"
+
+body_now=$(gh api "repos/${REPO}/releases/tags/${TAG}" --jq '.body // ""') \
+  || die "body read-back failed for $TAG"
+case "$body_now" in
+  *"$local_digest"*) : ;;
+  *) die "release body does not record the published digest ${local_digest:0:16}… (stale provenance)" ;;
+esac
+
+log "RELEASE OK: $TAG asset=$deb_name size=$local_size digest=${local_digest:0:16}... body=verified"
