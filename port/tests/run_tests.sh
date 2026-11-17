@@ -1109,5 +1109,37 @@ print("OK")
 PY
 expect "retry bounded to 3, 5xx/transport retried, 4xx immediate" contains "OK" "$WORK/stdout"
 
+# ===========================================================================
+# Tracker churn (2026-11-18). GitHub's scheduler skips these crons often, so
+# every run filed a needs-human "watchdog idle" issue and the tracker never
+# closed — noise that hides a real fault. Self-healed gaps are now NOTES: they
+# stay in the run summary and ::notice logs, escalate to a tracker anomaly only
+# once silence means the schedules are effectively dark, and never enter the
+# anomaly dedup set.
+# ===========================================================================
+echo "[46] heartbeat: healed liveness gaps are notes, not tracker anomalies"
+python3 - "$REPO_ROOT/.github/workflows/pipeline-health.yml" > "$WORK/stdout" 2>&1 <<'PY'
+import re, sys, textwrap
+src = open(sys.argv[1]).read()
+m = re.search(r"python3 - <<'PYEOF'\n(.*?)\n\s*PYEOF\n", src, re.S)
+code = textwrap.dedent(m.group(1))
+compile(code, "pipeline-health", "exec")
+assert "notes = []" in code, "notes list missing"
+assert "FF-HEARTBEAT-NOTE" in code, "note prefix missing"
+assert not "FF-HEARTBEAT-NOTE".startswith("FF-HEARTBEAT:"), \
+    "note prefix must NOT fall into the anomaly dedup set"
+assert "age > max(24.0, AGE_LIMIT * 3)" in code, \
+    "watcher silence must escalate to an anomaly past the hard bound"
+assert "gap > max(24.0, self_limit * 3)" in code, \
+    "heartbeat silence must escalate to an anomaly past the hard bound"
+assert "rd.startswith('re-dispatch FAILED')" in code, \
+    "a FAILED re-dispatch must stay an actionable anomaly"
+assert "report = [f'- {a}' for a in anom] + [f'- {n}' for n in notes]" in code, \
+    "summary must still show notes alongside anomalies"
+assert "print(f'::notice::{n}')" in code, "notes must reach the log as ::notice"
+print("OK")
+PY
+expect "notes split, hard escalation, summary intact" contains "OK" "$WORK/stdout"
+
 printf '\n== %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [ "$FAIL" = "0" ]

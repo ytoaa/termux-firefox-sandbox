@@ -120,6 +120,13 @@ jobs:
                   tzinfo=datetime.timezone.utc)
 
           anom = []
+          # Informational liveness notes (2026-11-18): a gap that HEALED itself
+          # or that only reflects GitHub's scheduler lag is not actionable, so
+          # filing it on the needs-human tracker kept an issue open forever —
+          # alarm fatigue that masks real faults. Notes still go to the run
+          # summary and ::notice logs, and escalate to `anom` once silence is
+          # long enough to mean the schedules are effectively dark.
+          notes = []
 
           # Crash isolation (F-02): every check runs guarded. A crashed check
           # appends an explicit MISSING-result anomaly; it can neither erase
@@ -148,8 +155,11 @@ jobs:
                           rd = 're-dispatched'
                       except Exception as e:
                           rd = f're-dispatch FAILED ({e})'
-                      anom.append(f'FF-HEARTBEAT: watcher stale {age:.1f}h '
-                                  f'(limit {AGE_LIMIT}h) — {rd}')
+                      line = (f'watcher stale {age:.1f}h (limit {AGE_LIMIT}h) — {rd}')
+                      if rd.startswith('re-dispatch FAILED') or age > max(24.0, AGE_LIMIT * 3):
+                          anom.append(f'FF-HEARTBEAT: {line}')
+                      else:
+                          notes.append(f'FF-HEARTBEAT-NOTE: {line} (self-healed; no action)')
 
           # 2) gate declines awaiting maintainer decision
           def check2():
@@ -213,9 +223,13 @@ jobs:
               else:
                   gap = (utcnow - parse(prev)).total_seconds() / 3600
                   if gap > self_limit:
-                      anom.append(f'FF-HEARTBEAT: this watchdog itself idle {gap:.1f}h '
-                                  f'(limit {self_limit}h) — GitHub scheduler skipped '
-                                  f'heartbeat runs; checks above cover only from now on')
+                      line = (f'this watchdog itself idle {gap:.1f}h (limit '
+                              f'{self_limit}h) — GitHub scheduler skipped heartbeat '
+                              f'runs; checks above cover only from now on')
+                      if gap > max(24.0, self_limit * 3):
+                          anom.append(f'FF-HEARTBEAT: {line}')
+                      else:
+                          notes.append(f'FF-HEARTBEAT-NOTE: {line} (scheduler lag; no action)')
 
           # 7) F-16 (design since the 09-28 panel, shipped 10-02): GitHub
           #    disables scheduled workflows after 60 days of default-branch
@@ -282,11 +296,14 @@ jobs:
               anom.append('FF-HEARTBEAT: SYNTHETIC force_anomaly injection '
                           '(test path, no real fault)')
 
-          # report
+          # report — anomalies drive the tracker; notes stay visible here and
+          # in the ::notice lines so a healed gap is never invisible.
           head = f'## Pipeline heartbeat {utcnow.strftime("%FT%TZ")}\n'
+          report = [f'- {a}' for a in anom] + [f'- {n}' for n in notes]
           with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f:
-              f.write(head + ('\n'.join(f'- {a}' for a in anom)
-                              or '- all checks green') + '\n')
+              f.write(head + ('\n'.join(report) or '- all checks green') + '\n')
+          for n in notes:
+              print(f'::notice::{n}')
 
           title = 'FF pipeline heartbeat — pipeline anomalies'
           tr = next((i for i in req('/issues?state=open&per_page=20')
@@ -334,7 +351,9 @@ jobs:
                   print(f'::notice::all {len(anom)} anomalies already on record — '
                         f'comment deduped; tracker issue #{tr["number"]} stays open')
           else:
-              print('all checks green')
+              print('all checks green' if not notes else
+                    f'no anomalies; {len(notes)} informational note(s) — '
+                    f'tracker not driven')
               if tr:
                   req(f"/issues/{tr['number']}/comments",
                       {'body': 'All checks green — auto-closing.'}, method='POST')

@@ -329,3 +329,12 @@ permanently red history is itself a hazard: it is how a real failure hides.
 Genuine incident history (the 2026-10-22..11-04 watcher failures, one per
 schedule until the PR-creation toggle was enabled) is deliberately left in the
 tab: it is dated evidence for the fix described above, not noise to erase.
+
+- **Tracker churn from platform lag.** GitHub frequently stretches these
+  crons, so every heartbeat filed a needs-human "watchdog idle" tracker issue
+  and the tracker almost never closed (issues #3-#6 in the 11-05..11-15
+  window). A self-healed gap is not actionable, so liveness lines are now
+  `FF-HEARTBEAT-NOTE:` entries: shown in the run summary and as `::notice`,
+  never fed to the tracker or its dedup set, and promoted to a real anomaly
+  only past a 24h/3x-limit hard bound (or when a re-dispatch fails). Scenario
+  [46] pins that split.
