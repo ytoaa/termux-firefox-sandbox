@@ -3,19 +3,19 @@ Label: Termux Firefox sandbox port
 Suite: stable
 Codename: stable
 Version: 2026-11-17
-Date: Tue, 17 Nov 2026 05:20:12 +0000
+Date: Tue, 17 Nov 2026 18:53:56 +0000
 Architectures: aarch64
 Components: main
 Description: Validated sandbox-port Firefox builds (version-lead scheme)
 MD5Sum:
- 7db50cbcfe33dd34d2412eabfed4ff16 6261 main/binary-aarch64/Packages
- a3c0807b188fdf9924f5492788dbedbd 1319 main/binary-aarch64/Packages.gz
+ df3cbb73315b2c64165881c31fbec33b 6261 main/binary-aarch64/Packages
+ dbca91935461c70ce469a5aa7452d4e7 1321 main/binary-aarch64/Packages.gz
 SHA1:
- 7670288c8e2ca6c12fc3dd264349212d881c5a65 6261 main/binary-aarch64/Packages
- 8ba44846447fd1b3de08432d0cca414ccaf947cd 1319 main/binary-aarch64/Packages.gz
+ 5827b99b7db1f248e5ac56933d92b22f27808060 6261 main/binary-aarch64/Packages
+ 7a1c79e6c71514e62265cfd34ad9922f00a090f4 1321 main/binary-aarch64/Packages.gz
 SHA256:
- beb875228dfb859fdc0ea08052ebe15b54fb6477f6e2047512daa991a887e90a 6261 main/binary-aarch64/Packages
- f7bac1a223ac0e6027e72220aade607202e1f65e043ea56820d9fb01ea1e62ed 1319 main/binary-aarch64/Packages.gz
+ 1f3db55ed186707488c301a178c291976bbc0ace80823f22461646ed2794647e 6261 main/binary-aarch64/Packages
+ 722c9e9e3fd30f865949d729f386d0f4f0409c16716a8d35a0ea99cb7af906de 1321 main/binary-aarch64/Packages.gz
 SHA512:
- fe36f08f86540ae9993d3684deb8441262b454cb846dffb78c0b014b682b3c8f0cf4c643fc2a35977d41adc33adbcfd3dc05585d2fe0baceb0a44120c9825667 6261 main/binary-aarch64/Packages
- 36f4d856bdee575f10b5e6c50eb66b9a2656db6bbfe91068582a74308fc5f2ffc3ac3be32c6faf197743fc2a4981d7488083a60ae512a64eb9aac52f53d59d95 1319 main/binary-aarch64/Packages.gz
+ a8dc8685b09bbc91bc869e319a79cd07b12474cb8b9ece22c08f28f59957a84a4895151c0a42d7d6b29787abf522f48369d3fd5907258a27d30e19bd4cd21131 6261 main/binary-aarch64/Packages
+ 4c5cd7b7c836cd7f0cf822ebc557b537f042c83b96e735a329b111991a81e2c372bab2cf5007069a7c58436094d8f65bccb2e8a9ea047e6020d3e31f842b4e24 1321 main/binary-aarch64/Packages.gz
