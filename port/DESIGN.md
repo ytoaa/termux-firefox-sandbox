@@ -329,3 +329,5 @@ permanently red history is itself a hazard: it is how a real failure hides.
 Genuine incident history (the 2026-10-22..11-04 watcher failures, one per
 schedule until the PR-creation toggle was enabled) is deliberately left in the
 tab: it is dated evidence for the fix described above, not noise to erase.
+
+<!-- probe: non-anchor change (expect a ci-tests run) -->
