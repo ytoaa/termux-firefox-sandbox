@@ -74,7 +74,7 @@ jobs:
       - name: health checks
         run: |
           python3 - <<'PYEOF'
-          import json, os, re, hashlib, datetime, urllib.request
+          import json, os, re, hashlib, datetime, time, urllib.request, urllib.error
 
           API = os.environ['API']
           TOK = os.environ['TOKEN']
@@ -86,13 +86,34 @@ jobs:
                'Content-Type': 'application/json'}
           utcnow = datetime.datetime.now(datetime.timezone.utc)
 
-          def req(path, body=None, method='GET'):
+          # Transient-fault retry (2026-11-18): run 39993913201 failed the
+          # whole heartbeat on ONE HTTP 500 in the report path, leaving a red
+          # run with no anomaly record — a red that teaches nothing and hides
+          # whether the pipeline was healthy. Every call now retries 5xx and
+          # transport errors with bounded backoff (2s, 4s) before giving up, so
+          # only a persistent fault reddens the run. A retried POST/PATCH can
+          # duplicate a write whose response was lost; the next cycle's
+          # signature dedup absorbs that (identical anomaly lines are skipped),
+          # so the worst case is one extra comment on a genuinely new anomaly.
+          def req(path, body=None, method='GET', attempts=3):
               data = json.dumps(body).encode() if body is not None else None
-              r = urllib.request.Request(API + path, data=data, headers=H,
-                                         method='POST' if method == 'POST' and data else
-                                         'PATCH' if method == 'PATCH' else None)
-              raw = urllib.request.urlopen(r, timeout=30).read()
-              return json.loads(raw) if raw else {}
+              last = None
+              for n in range(attempts):
+                  r = urllib.request.Request(API + path, data=data, headers=H,
+                                             method='POST' if method == 'POST' and data else
+                                             'PATCH' if method == 'PATCH' else None)
+                  try:
+                      raw = urllib.request.urlopen(r, timeout=30).read()
+                      return json.loads(raw) if raw else {}
+                  except urllib.error.HTTPError as e:
+                      last = e
+                      if e.code < 500:      # 4xx is a real answer, never retried
+                          raise
+                  except (urllib.error.URLError, OSError) as e:
+                      last = e
+                  if n + 1 < attempts:
+                      time.sleep(2 * (n + 1))
+              raise last
 
           def parse(ts):
               return datetime.datetime.strptime(ts, '%Y-%m-%dT%H:%M:%SZ').replace(

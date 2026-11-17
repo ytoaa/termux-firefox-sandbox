@@ -303,3 +303,29 @@ Repaired 2026-11-05 — every body now records the attached asset's sha256:
 Each run/commit pair was verified from that run's job log (`ref:` checkout
 line) and each digest from the same run's `RELEASE OK` line; the superseded
 values are preserved under "Repair history (append-only)" in the bodies.
+
+### Actions tab truthfulness (2026-11-18)
+
+Two red classes in the Actions tab were not pipeline regressions, and a
+permanently red history is itself a hazard: it is how a real failure hides.
+
+- **Phantom PR run.** Renovate's anchor PR is opened with this repo's
+  `GITHUB_TOKEN`, so GitHub creates its `pull_request` run only as a zero-job
+  approval artifact. The auto-merge gate merges the PR within a minute, the
+  artifact resolves to `failure` with no logs, and the tab shows a red
+  "Port test harness (pre-merge)" at every upstream bump (runs 41865549427,
+  44013287701). The run never contained a result: the harness for those PRs is
+  executed by `auto-merge-upstream.yml` BEFORE merge authority. `ci-tests.yml`
+  now ignores exactly `port/upstream.renovate` on `pull_request`, which stops
+  the artifact at dispatch. This is not a general paths filter — any PR that
+  touches another file (including workflow-only changes) still runs the
+  harness, and scenario [41] asserts both halves plus the chain harness.
+- **Heartbeat killed by one HTTP 500.** Run 39993913201 (2026-10-23) failed the
+  whole run on a single transient 500 in the report path, producing a red run
+  that recorded no anomaly. Every heartbeat request now retries 5xx and
+  transport faults with bounded backoff (3 attempts, 2s/4s) and never retries
+  a 4xx. Scenario [45] proves the bound, the recovery, and the 4xx pass-through.
+
+Genuine incident history (the 2026-10-22..11-04 watcher failures, one per
+schedule until the PR-creation toggle was enabled) is deliberately left in the
+tab: it is dated evidence for the fix described above, not noise to erase.

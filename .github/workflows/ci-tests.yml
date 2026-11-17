@@ -1,17 +1,29 @@
 name: Port test harness (pre-merge)
 
 # Direct PR harness for ordinary/human-created PRs plus manual rehearsal.
-# Renovate's anchor PR is created by this repository's GITHUB_TOKEN; GitHub's
-# recursion/approval behavior can leave that pull_request run as
-# action_required with zero jobs. Therefore this workflow is NOT the sole
-# authority for Renovate PRs: .github/workflows/auto-merge-upstream.yml runs
-# the same syntax/compile/YAML/full harness in its workflow_run chain BEFORE
-# any merge authority is exercised.
+# Renovate's anchor PR is created by this repository's GITHUB_TOKEN, so GitHub
+# creates its pull_request run only as a zero-job approval artifact that
+# resolves to `failure` the instant the bot PR is auto-merged (observed
+# 2026-11-04 run 41865549427, 2026-11-17 run 44013287701: 0 jobs, no logs,
+# check suite `failure`). That artifact carries no harness result, yet it made
+# the Actions tab permanently red at every upstream bump — alarm fatigue that
+# hides real regressions. Therefore this workflow is NOT the sole authority for
+# Renovate PRs: .github/workflows/auto-merge-upstream.yml runs the same
+# syntax/compile/YAML/full harness in its workflow_run chain BEFORE any merge
+# authority is exercised (step "Pre-merge harness (authoritative ...)").
 #
-# No paths filter: workflow-only changes must still run the direct PR harness.
+# Narrow paths-ignore (2026-11-18): a Renovate bump PR changes EXACTLY one
+# file, so ignoring that file stops the phantom run at dispatch time instead of
+# at merge time. This is deliberately not a general paths filter — every other
+# PR, including workflow-only changes and any PR touching more than the anchor,
+# still runs the harness unconditionally. Harness scenario [41] asserts both
+# halves of that contract.
+#
 # workflow_dispatch remains available to rehearse a branch explicitly.
 on:
   pull_request:
+    paths-ignore:
+      - port/upstream.renovate
   workflow_dispatch:
 
 permissions:

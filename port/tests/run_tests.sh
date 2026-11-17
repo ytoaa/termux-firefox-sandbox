@@ -894,10 +894,24 @@ assert "steps.resolve.outputs.termux_commit" in fs
 assert "needs.check-upstream.outputs.termux_commit" in fs
 assert "[0-9a-f]{40}" in fs, "resolve must validate 40-hex"
 assert "git archive FETCH_HEAD pool" in fs, "apt pool seeding from published branch"
-# harness triggers on EVERY PR (no workflow-only blind spot)
+# harness triggers on EVERY PR except the bot anchor-bump phantom (2026-11-18):
+# the exact-ignore exists only so Renovate's GITHUB_TOKEN-created PR — whose
+# pull_request run is a zero-job approval artifact that always ends in
+# `failure` at merge time — stops being created at all. Its real gate is the
+# auto-merge chain harness below, so coverage never depends on this run.
 assert re.search(r"^\s*pull_request:\s*$", ci, re.MULTILINE), "ci-tests must trigger on all PRs"
 ci_nocomments = "\n".join(l for l in ci.splitlines() if not l.lstrip().startswith("#"))
-assert "paths:" not in ci_nocomments, "no paths filter allowed on the pre-merge harness"
+assert "paths:" not in ci_nocomments, "no include paths filter allowed on the pre-merge harness"
+m_pi = re.search(r"^\s*pull_request:\s*$\n((?:    .*\n)*)", ci_nocomments, re.MULTILINE)
+assert m_pi, "pull_request trigger must stay explicit (paths-ignore lives under it)"
+assert re.search(r"^    paths-ignore:\n      - port/upstream\.renovate\n", m_pi.group(1), re.MULTILINE), \
+    "paths-ignore must ignore EXACTLY the anchor file (no wider blind spot)"
+assert len(re.findall(r"^      - ", m_pi.group(1), re.MULTILINE)) == 1, \
+    "paths-ignore must carry exactly one entry"
+# the ignore is only legitimate because the bot PR is gated elsewhere:
+assert "Pre-merge harness (authoritative for Renovate bot PRs)" in am, \
+    "auto-merge chain must keep the authoritative harness step"
+assert "bash port/tests/run_tests.sh" in am, "auto-merge chain must run the full harness"
 # build workflow push trigger must NEVER fire on tag pushes (10-02 incident:
 # a PAT-created release tag fired a full build running the OLD tag policy)
 fs_nocomments = "\n".join(l for l in fs.splitlines() if not l.lstrip().startswith("#"))
@@ -1012,6 +1026,88 @@ assert "repair_release_body.sh" in code, "repair path not named in the anomaly"
 print("OK")
 PY
 expect "check8 wired, guarded, compiles" contains "OK" "$WORK/stdout"
+
+# ===========================================================================
+# Heartbeat HTTP retry (2026-11-18). Run 39993913201 reddened the whole
+# heartbeat on a single transient HTTP 500 in the report path — a red run with
+# no anomaly record. The retry must be bounded, must retry 5xx / transport
+# faults, and must NEVER retry a 4xx (that is a real answer, not a fault).
+# ===========================================================================
+echo "[45] heartbeat: bounded retry on 5xx/transport, no retry on 4xx"
+python3 - "$REPO_ROOT/.github/workflows/pipeline-health.yml" > "$WORK/stdout" 2>&1 <<'PY'
+import re, sys, textwrap, json, urllib.request, urllib.error
+src = open(sys.argv[1]).read()
+m = re.search(r"python3 - <<'PYEOF'\n(.*?)\n\s*PYEOF\n", src, re.S)
+code = textwrap.dedent(m.group(1))
+start = code.index("def req(")
+end = code.index("def parse(")
+req_src = code[start:end]
+assert "attempts=3" in req_src, "retry bound must be explicit"
+
+class _NoSleep:
+    slept = []
+    @staticmethod
+    def sleep(s):
+        _NoSleep.slept.append(s)
+
+g = {"json": json, "urllib": urllib, "time": _NoSleep,
+     "API": "https://api.test/repos/o/r", "H": {}}
+exec(req_src, g)
+req = g["req"]
+
+class Resp:
+    def __init__(self, payload):
+        self.payload = payload
+    def read(self):
+        return json.dumps(self.payload).encode()
+
+real = urllib.request.urlopen
+calls = []
+script = []   # per-call: an exception instance to raise, or None for success
+
+def fake(r, timeout=None):
+    calls.append(r.full_url)
+    exc = script.pop(0) if script else None
+    if exc is not None:
+        raise exc
+    return Resp({"ok": True})
+
+def http(code):
+    return urllib.error.HTTPError("https://api.test/x", code, "boom", {}, None)
+
+urllib.request.urlopen = fake
+try:
+    # 1) two 500s then success -> recovered on exactly the 3rd attempt
+    calls.clear(); script[:] = [http(500), http(500)]
+    assert req("/x") == {"ok": True}, "retry must recover from transient 5xx"
+    assert len(calls) == 3, f"expected 3 attempts, got {len(calls)}"
+
+    # 2) persistent 500 -> bounded at 3 attempts, then raise
+    calls.clear(); script[:] = [http(500), http(500), http(500)]
+    try:
+        req("/x"); raise AssertionError("persistent 500 must raise")
+    except urllib.error.HTTPError as e:
+        assert e.code == 500
+    assert len(calls) == 3, f"retry must be bounded, got {len(calls)}"
+
+    # 3) transport fault -> retried, then recovers
+    calls.clear(); script[:] = [urllib.error.URLError("connection reset")]
+    assert req("/x") == {"ok": True}, "transport fault must be retried"
+    assert len(calls) == 2, f"expected 2 attempts, got {len(calls)}"
+
+    # 4) 4xx -> never retried (a 4xx is an answer, not a fault)
+    calls.clear(); script[:] = [http(404)]
+    try:
+        req("/x"); raise AssertionError("404 must raise")
+    except urllib.error.HTTPError as e:
+        assert e.code == 404
+    assert len(calls) == 1, f"4xx must not be retried, got {len(calls)}"
+    assert _NoSleep.slept, "retries must back off between attempts"
+finally:
+    urllib.request.urlopen = real
+print("OK")
+PY
+expect "retry bounded to 3, 5xx/transport retried, 4xx immediate" contains "OK" "$WORK/stdout"
 
 printf '\n== %d passed, %d failed ==\n' "$PASS" "$FAIL"
 [ "$FAIL" = "0" ]
